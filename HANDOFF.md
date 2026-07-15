@@ -181,6 +181,41 @@ game; if it crashes again, grep for `sceKernelDlsym FAILED` first.
 Note: repo was renamed SharpEmu → Hyper5 in `be45e4a` (projects are now
 `src/Hyper5.*`, solution is `Hyper5.slnx`).
 
+## Third run — dlsym resolved; now blocked on GC stop-the-world
+
+The name→NID fix worked: `sceKernelDlsym: symbol='scriptingGetMem' ->
+0x801376BD0`, il2cpp spawned another worker, then the game **hangs alive** (no
+crash, no progress). Last log line:
+`Import#4352 unresolved: nid=il03nluKfMk rdi=<GC helper handle> rsi=0x1E`.
+
+`il03nluKfMk` = `sceKernelRaiseException(thread, signo=30)` — Unity/il2cpp's
+Boehm GC stop-the-world. The collector raises signal 30 on each
+`AssetGarbageCollectorHelper` thread; each thread's installed exception handler
+(`sceKernelInstallExceptionHandler`, already stored in
+`KernelExceptionCompatExports`) is meant to save its register context, ack, and
+park until restart. Unresolved ⇒ no acks ⇒ collector waits forever.
+
+Landed (`KernelExceptionCompatExports.cs`): registered `sceKernelRaiseException`
+so it no longer trips the unresolved-import sentinel, and it now logs the target
+thread, signo, and the **installed handler address**. It does NOT yet deliver
+the signal — real delivery needs to run the handler on the *target* thread with
+a reconstructed guest `mcontext_t`, and that struct layout is unverified;
+guessing it would corrupt the GC's conservative stack scan (worse than a clean
+stall, per this file's own rule).
+
+**Next step — this is the current blocker.** Re-run and capture:
+1. Does the game call `sceKernelInstallExceptionHandler(30, ...)`? What handler
+   address does the new WARN line print?
+2. Disassemble that handler (it's in the il2cpp/libgc LLE module, ~`0x16A8A3…`
+   range at load) to recover which `mcontext_t`/`ucontext_t` offsets it reads —
+   that gives the real struct layout needed for delivery.
+3. Then implement delivery: record a pending signal on the target
+   `GuestThreadState`, wake it, and in `RunGuestThread` (before it resumes its
+   blocked continuation) run the handler on that thread's own context with the
+   rebuilt ucontext, preserving the original continuation to resume when the
+   handler returns (needs a nested/continuation-stack path — the single
+   `BlockedContinuation` slot isn't enough for the reentrant case).
+
 ## Suggested next steps, in priority order
 
 1. Run whatever games you have locally against this branch, collect logs.
