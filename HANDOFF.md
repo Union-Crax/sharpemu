@@ -132,6 +132,34 @@ game actually gets further. That's the next step.
   python3 scripts/check_sysabi_aerolib.py
   ```
 
+## 2026-07-15 update — first real-game run (Windows)
+
+A Unity IL2CPP title was run on Windows. It got through module loading, LLE
+redirects, guest entry, libc init, sceAppContent init, a ~20 MB metadata read,
+and thread spawning, then crashed with an execute-AV at RIP=0 inside
+`il2cpp_init`. Root cause: an **unresolved `sceKernelDlsym` (NID LwG8g3niqwA)**
+— the failure path wrote NULL to the out-pointer and the caller invoked it
+without a null check. The requested symbol name was not logged, so it is still
+unknown. Fixes landed in `f26d61a`:
+
+- dlsym now logs every request (`[LOADER][WARN] sceKernelDlsym FAILED:
+  symbol='...'` on failure) — **re-run the game and grep for that line**; the
+  symbol it names is the next thing to implement.
+- `sceKernelCreateSema` wrote only 4 of 8 handle bytes (guest slots showed
+  `0xC0DEC0DE00000044`); now writes 64-bit.
+- `sceKernelWaitSema(timeout=NULL)` on a host-owned thread returned TRY_AGAIN
+  immediately; now pump-polls until signal/cancel/delete (DIAG line after 5 s).
+- Guest path layer now handles host Windows drive paths (`/C:/dir` canonical
+  form); the two chdir/getcwd/realpath tests that failed on Windows pass.
+- `global.json` rollForward is now `latestFeature` (this box has SDK 10.0.3xx).
+
+Also observed in the log, triaged as benign for now: `sceKernelVirtualQuery`/
+`sceKernelDirectMemoryQuery` NOT_FOUND early in init (likely queried before
+anything was mapped there; game continued), `sceUserServiceGetGamePresets`
+returning a UserService-facility error (0x80960005), and unresolved socket/
+sceNet trampolines (setsockopt/accept/listen/epoll/resolver — not on the crash
+path yet, but Unity networking will want them eventually).
+
 ## Suggested next steps, in priority order
 
 1. Run whatever games you have locally against this branch, collect logs.
