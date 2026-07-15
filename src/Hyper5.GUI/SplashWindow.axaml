@@ -1,0 +1,53 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Hyper5.GUI.SplashWindow"
+        Title="Hyper5"
+        Width="460" Height="300"
+        CanResize="False"
+        ShowInTaskbar="False"
+        SystemDecorations="None"
+        WindowStartupLocation="CenterScreen"
+        Background="#10110F"
+        Icon="avares://Hyper5.GUI/Assets/Hyper5.ico">
+  <Border Background="#10110F"
+          BorderBrush="#33342D"
+          BorderThickness="1"
+          CornerRadius="8">
+    <Grid RowDefinitions="*,Auto" Margin="34,28">
+      <StackPanel Grid.Row="0" Spacing="12" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Image Source="avares://Hyper5.GUI/Assets/Hyper5.png"
+               Width="126" Height="126"
+               RenderOptions.BitmapInterpolationMode="HighQuality" />
+        <StackPanel Spacing="4" HorizontalAlignment="Center">
+          <TextBlock Text="Hyper5"
+                     FontSize="24"
+                     FontWeight="SemiBold"
+                     Foreground="#ECE9E0"
+                     HorizontalAlignment="Center" />
+          <TextBlock x:Name="VersionText"
+                     Text="Starting"
+                     FontSize="11"
+                     Foreground="#AAA89F"
+                     HorizontalAlignment="Center" />
+        </StackPanel>
+      </StackPanel>
+
+      <StackPanel Grid.Row="1" Spacing="8">
+        <ProgressBar IsIndeterminate="True"
+                     Height="3"
+                     Background="#22231D"
+                     Foreground="#C49A54" />
+        <TextBlock x:Name="StatusText"
+                   Text="Loading launcher"
+                   FontSize="11"
+                   Foreground="#74736C"
+                   HorizontalAlignment="Center" />
+      </StackPanel>
+    </Grid>
+  </Border>
+</Window>

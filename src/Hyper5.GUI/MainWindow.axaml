@@ -327,10 +327,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                            <Grid ColumnDefinitions="*,Auto">
                              <StackPanel Spacing="3" Margin="0,0,16,0">
                                <TextBlock Text="Open-source credits" FontSize="12" FontWeight="SemiBold" />
-                               <TextBlock Text="Hyper5 is based on the original Hyper5 project. Credits to Hyper5 and its contributors."
+                               <TextBlock Text="Hyper5 is based on the original SharpEmu project. Credits to SharpEmu and its contributors."
                                           FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
                              </StackPanel>
-                             <Button x:Name="OriginalRepoButton" Grid.Column="1" Classes="ghost" Content="View Hyper5" VerticalAlignment="Center" />
+                             <Button x:Name="OriginalRepoButton" Grid.Column="1" Classes="ghost" Content="View SharpEmu" VerticalAlignment="Center" />
                            </Grid>
                          </Border>
                       </StackPanel>

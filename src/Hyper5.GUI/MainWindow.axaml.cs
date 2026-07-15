@@ -63,6 +63,7 @@ public partial class MainWindow : Window
     private WindowState _windowStateBeforeFullScreen = WindowState.Maximized;
     private int _autoScrollTicks;
     private int _activePageIndex;
+    private bool _startupInitialized;
 
     // Discord Rich Presence state.
     private readonly long _launcherStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -187,7 +188,6 @@ public partial class MainWindow : Window
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId, "Clipboard.TitleId");
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
 
-        Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
 
         DualSenseReader.EnsureStarted();
@@ -610,8 +610,14 @@ public partial class MainWindow : Window
         return width > TileOuterWidth ? (int)(width / TileOuterWidth) : 1;
     }
 
-    private async Task OnOpenedAsync()
+    public async Task InitializeStartupAsync()
     {
+        if (_startupInitialized)
+        {
+            return;
+        }
+
+        _startupInitialized = true;
         var version = Assembly.GetExecutingAssembly().GetName().Version;
         var display = version is not null ? $"v{version.ToString(3)}" : "v0.0.1";
         display += BuildInfo.CommitSha is null
