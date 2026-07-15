@@ -1470,9 +1470,24 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		// Tier 0: ELF runtime symbols and aliases.
-		if (TryResolveRuntimeSymbolAddress(symbolName, out guestAddress) ||
-			TryResolveRuntimeSymbolAlias(symbolName, out guestAddress))
+		// Tier 0: ELF runtime symbols by literal name.
+		if (TryResolveRuntimeSymbolAddress(symbolName, out guestAddress))
+		{
+			return true;
+		}
+
+		// Module export tables are NID-keyed; real sceKernelDlsym hashes the
+		// requested name before searching, so derive the NID and retry. This is
+		// what resolves game/engine exports absent from the aerolib catalog
+		// (e.g. Unity's 'scriptingGetMem', exported by the eboot itself).
+		var derivedNid = Aerolib.DeriveNid(symbolName);
+		if (TryResolveRuntimeSymbolAddress(derivedNid, out guestAddress) ||
+			TryFindImportStubGuestAddress(derivedNid, out guestAddress))
+		{
+			return true;
+		}
+
+		if (TryResolveRuntimeSymbolAlias(symbolName, out guestAddress))
 		{
 			return true;
 		}
@@ -1882,7 +1897,12 @@ public sealed partial class DirectExecutionBackend
 			_ => null,
 		};
 
-		return alias != null && TryResolveRuntimeSymbolAddress(alias, out address);
+		// The alias target is itself a plain name; module exports are NID-keyed,
+		// so try its derived NID as well (e.g. malloc lives in LLE libc under
+		// its NID, not under the literal string "malloc").
+		return alias != null &&
+			(TryResolveRuntimeSymbolAddress(alias, out address) ||
+			TryResolveRuntimeSymbolAddress(Aerolib.DeriveNid(alias), out address));
 	}
 
 	private OrbisGen2Result DispatchIl2CppApiLookupSymbol()
@@ -1918,6 +1938,12 @@ public sealed partial class DirectExecutionBackend
 	private bool TryResolveIl2CppApiAddress(string symbolName, out ulong address)
 	{
 		if (TryResolveRuntimeSymbolAddress(symbolName, out address))
+		{
+			return true;
+		}
+
+		if (!string.IsNullOrWhiteSpace(symbolName) &&
+			TryResolveRuntimeSymbolAddress(Aerolib.DeriveNid(symbolName), out address))
 		{
 			return true;
 		}

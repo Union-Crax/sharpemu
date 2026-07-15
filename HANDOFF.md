@@ -160,6 +160,27 @@ returning a UserService-facility error (0x80960005), and unresolved socket/
 sceNet trampolines (setsockopt/accept/listen/epoll/resolver — not on the crash
 path yet, but Unity networking will want them eventually).
 
+## Second run — dlsym symbol identified: name→NID hashing was missing
+
+The new logging named the crasher on the first re-run:
+`sceKernelDlsym FAILED: handle=0x0 symbol='scriptingGetMem'` (Unity's
+scripting-heap callback). Root cause: module export tables are **NID-keyed**,
+and real `sceKernelDlsym` hashes the requested name to its NID before
+searching — but `TryResolveDlsymGuestAddress` only tried the literal name and
+aerolib-catalog names, so any game/engine-specific export could never resolve.
+The eboot itself exports `scriptingGetMem` (NID `ayuoL6Vjz2k` — visible as the
+frame#7 symbol in both crash logs), so the target was in the runtime symbol
+table all along.
+
+Fix: `Aerolib.DeriveNid()` (C# port of `name2nid()`; keep the two in sync —
+`AerolibNidTests` cross-checks 500 catalog entries) is now tried in
+`TryResolveDlsymGuestAddress`, the `scriptingGetMem→malloc`-style alias helper
+(aliases are plain names too), and `TryResolveIl2CppApiAddress`. Re-run the
+game; if it crashes again, grep for `sceKernelDlsym FAILED` first.
+
+Note: repo was renamed SharpEmu → Hyper5 in `be45e4a` (projects are now
+`src/Hyper5.*`, solution is `Hyper5.slnx`).
+
 ## Suggested next steps, in priority order
 
 1. Run whatever games you have locally against this branch, collect logs.
