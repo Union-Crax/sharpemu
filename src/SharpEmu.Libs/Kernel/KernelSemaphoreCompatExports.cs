@@ -85,7 +85,10 @@ public static class KernelSemaphoreCompatExports
         };
         _semaphores[handle] = state;
 
-        if (!ctx.TryWriteUInt32(semaphoreAddress, handle))
+        // OrbisKernelSema is pointer-sized in guest headers; write all 8 bytes so the
+        // upper half doesn't keep the allocator fill pattern (games pass the slot back
+        // verbatim in RDI, e.g. 0xC0DEC0DE00000044 was observed with a 4-byte write).
+        if (!ctx.TryWriteUInt64(semaphoreAddress, handle))
         {
             _semaphores.TryRemove(handle, out _);
             // Handles are sequential and guest-predictable, so a hostile guest can
@@ -126,6 +129,8 @@ public static class KernelSemaphoreCompatExports
         }
 
         var pollTimedOut = false;
+        var hostOwnedInfiniteWait = false;
+        var cancelEpochAtWait = 0;
         lock (semaphore.Gate)
         {
             if (semaphore.Count >= needCount)
@@ -185,21 +190,30 @@ public static class KernelSemaphoreCompatExports
                     NeedCount = needCount,
                     CancelEpochAtBlock = semaphore.CancelEpoch,
                 };
-                if (!GuestThreadExecution.RequestCurrentThreadBlock(
+                if (GuestThreadExecution.RequestCurrentThreadBlock(
                         ctx,
                         "sceKernelWaitSema",
                         GetSemaphoreWakeKey(handle),
                         resumeHandler: () => CompleteBlockedSemaWait(semaphore, waiter),
                         wakeHandler: () => TryConsumeBlockedSemaWait(semaphore, waiter)))
                 {
-                    TraceSemaphore($"wait-would-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
-                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
+                    semaphore.WaitingThreads++;
+                    TraceSemaphore($"wait-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
                 }
 
-                semaphore.WaitingThreads++;
-                TraceSemaphore($"wait-block handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count} waiters={semaphore.WaitingThreads}");
-                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+                // Host-owned threads cannot park in the guest scheduler. An infinite
+                // wait must never surface TRY_AGAIN (real hardware blocks until
+                // signal/cancel/delete), so degrade to a pump-poll loop below.
+                hostOwnedInfiniteWait = true;
+                cancelEpochAtWait = semaphore.CancelEpoch;
+                TraceSemaphore($"wait-host-poll handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
             }
+        }
+
+        if (hostOwnedInfiniteWait)
+        {
+            return ctx.SetReturn(HostThreadInfiniteWaitPoll(ctx, handle, semaphore, needCount, cancelEpochAtWait));
         }
 
         GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelWaitSema");
@@ -352,6 +366,61 @@ public static class KernelSemaphoreCompatExports
         _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(GetSemaphoreWakeKey(handle));
         TraceSemaphore($"delete handle=0x{handle:X8} name='{semaphore.Name}'");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    // Degrade path for host-owned threads (e.g. the main thread running the guest
+    // entry), which cannot park in the guest scheduler: emulate the infinite wait
+    // by pumping the scheduler and re-checking until signal/cancel/delete.
+    private static OrbisGen2Result HostThreadInfiniteWaitPoll(
+        CpuContext ctx,
+        uint handle,
+        KernelSemaphoreState semaphore,
+        int needCount,
+        int cancelEpochAtWait)
+    {
+        var stallLogDeadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 5;
+        var spins = 0;
+        while (true)
+        {
+            lock (semaphore.Gate)
+            {
+                if (semaphore.Deleted)
+                {
+                    TraceSemaphore($"wait-host-poll-deleted handle=0x{handle:X8} name='{semaphore.Name}' need={needCount}");
+                    return OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
+                }
+
+                if (semaphore.CancelEpoch != cancelEpochAtWait)
+                {
+                    TraceSemaphore($"wait-host-poll-canceled handle=0x{handle:X8} name='{semaphore.Name}' need={needCount}");
+                    return OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED;
+                }
+
+                if (semaphore.Count >= needCount)
+                {
+                    semaphore.Count -= needCount;
+                    TraceSemaphore($"wait-host-poll-consume handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
+                    return OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+            }
+
+            GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelWaitSema");
+            if ((++spins & 63) == 0)
+            {
+                Thread.Sleep(1);
+            }
+            else
+            {
+                Thread.Yield();
+            }
+
+            if (Stopwatch.GetTimestamp() >= stallLogDeadline)
+            {
+                stallLogDeadline = long.MaxValue;
+                Console.Error.WriteLine(
+                    $"[LOADER][DIAG] sceKernelWaitSema host-thread infinite wait exceeded 5s: handle=0x{handle:X8} name='{semaphore.Name}' need={needCount}");
+            }
+        }
     }
 
     // Wake handler: runs under the scheduler's guest-thread gate (lock order:

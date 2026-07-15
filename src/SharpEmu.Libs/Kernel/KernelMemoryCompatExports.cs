@@ -4913,6 +4913,17 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
+        // "/C:/dir" is the canonical guest form of a host Windows drive path
+        // (produced by NormalizeGuestAbsolutePath); strip the POSIX-style
+        // leading slash back off so host filesystem APIs accept it.
+        if (guestPath.Length >= 3 &&
+            guestPath[0] == '/' &&
+            char.IsAsciiLetter(guestPath[1]) &&
+            guestPath[2] == ':')
+        {
+            return guestPath[1..];
+        }
+
         return guestPath;
     }
 

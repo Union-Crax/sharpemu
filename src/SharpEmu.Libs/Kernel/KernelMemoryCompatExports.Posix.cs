@@ -1359,7 +1359,13 @@ public static partial class KernelMemoryCompatExports
 
     private static string NormalizeGuestAbsolutePath(string path, string currentDirectory)
     {
-        var combined = path.StartsWith('/') ? path : currentDirectory + "/" + path;
+        // Host Windows paths (drive-letter form, possibly backslash-separated) reach
+        // this layer via host-supplied argv/config values and tests. Treat them as
+        // absolute and canonicalize to a POSIX-style "/C:/dir/file" form that
+        // ResolveGuestPath maps back to a host path.
+        var slashed = path.Replace('\\', '/');
+        var isAbsolute = slashed.StartsWith('/') || IsHostDrivePath(slashed);
+        var combined = isAbsolute ? slashed : currentDirectory + "/" + slashed;
         var segments = new List<string>();
         foreach (var segment in combined.Split('/', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -1382,6 +1388,9 @@ public static partial class KernelMemoryCompatExports
 
         return "/" + string.Join('/', segments);
     }
+
+    private static bool IsHostDrivePath(string path) =>
+        path.Length >= 2 && char.IsAsciiLetter(path[0]) && path[1] == ':';
 
     [SysAbiExport(
         Nid = "DYivN1nO-JQ",

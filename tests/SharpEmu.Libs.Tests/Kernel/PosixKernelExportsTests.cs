@@ -566,7 +566,7 @@ public sealed class PosixKernelExportsTests : IDisposable
         Assert.Equal(0, KernelMemoryCompatExports.PosixGetcwd(_ctx));
         Assert.Equal(BufferAddress, _ctx[CpuRegister.Rax]);
 
-        var expected = "/" + string.Join('/', dirPath.Split('/', StringSplitOptions.RemoveEmptyEntries));
+        var expected = "/" + string.Join('/', dirPath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries));
         Span<byte> readBack = stackalloc byte[expected.Length];
         Assert.True(_memory.TryRead(BufferAddress, readBack));
         Assert.Equal(expected, Encoding.UTF8.GetString(readBack));
@@ -683,7 +683,7 @@ public sealed class PosixKernelExportsTests : IDisposable
         Assert.Equal(0, KernelMemoryCompatExports.PosixRealpath(_ctx));
         Assert.Equal(BufferAddress, _ctx[CpuRegister.Rax]);
 
-        var expected = "/" + string.Join('/', filePath.Split('/', StringSplitOptions.RemoveEmptyEntries));
+        var expected = "/" + string.Join('/', filePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries));
         Span<byte> readBack = stackalloc byte[expected.Length];
         Assert.True(_memory.TryRead(BufferAddress, readBack));
         Assert.Equal(expected, Encoding.UTF8.GetString(readBack));

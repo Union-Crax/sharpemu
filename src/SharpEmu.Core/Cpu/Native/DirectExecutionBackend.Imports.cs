@@ -1374,19 +1374,24 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		NormalizeKernelDynlibDlsymArguments(cpuContext, out var symbolNameAddress, out var outputAddress);
+		var handle = cpuContext[CpuRegister.Rdi];
+		var symbolName = string.Empty;
 		try
 		{
-			if (!TryReadAsciiZ(symbolNameAddress, 512, out var symbolName) ||
+			if (!TryReadAsciiZ(symbolNameAddress, 512, out symbolName) ||
 				!TryResolveDlsymGuestAddress(symbolName, out var resolvedAddress) ||
 				outputAddress == 0 ||
 				!TryWriteUInt64Compat(outputAddress, resolvedAddress))
 			{
-				return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
+				return CompleteKernelDynlibDlsymFailure(cpuContext, handle, symbolName, symbolNameAddress, outputAddress);
 			}
+
+			Console.Error.WriteLine(
+				$"[LOADER][DEBUG] sceKernelDlsym: handle=0x{handle:X} symbol='{symbolName}' -> 0x{resolvedAddress:X16}");
 		}
 		catch
 		{
-			return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
+			return CompleteKernelDynlibDlsymFailure(cpuContext, handle, symbolName, symbolNameAddress, outputAddress);
 		}
 
 		cpuContext[CpuRegister.Rax] = 0uL;
@@ -1420,8 +1425,22 @@ public sealed partial class DirectExecutionBackend
 		return address >= 0x10000 && address < 0x0000_8000_0000_0000UL;
 	}
 
-	private OrbisGen2Result CompleteKernelDynlibDlsymFailure(CpuContext cpuContext, ulong outputAddress)
+	private OrbisGen2Result CompleteKernelDynlibDlsymFailure(
+		CpuContext cpuContext,
+		ulong handle,
+		string symbolName,
+		ulong symbolNameAddress,
+		ulong outputAddress)
 	{
+		// Callers frequently invoke the resolved pointer without a null check, so an
+		// unresolved dlsym is usually the last import before a RIP=0 crash. Name the
+		// symbol here so the compat log identifies what to implement.
+		var symbolText = string.IsNullOrEmpty(symbolName)
+			? $"<unreadable name ptr 0x{symbolNameAddress:X16}>"
+			: $"'{symbolName}'";
+		Console.Error.WriteLine(
+			$"[LOADER][WARN] sceKernelDlsym FAILED: handle=0x{handle:X} symbol={symbolText} out=0x{outputAddress:X16} (wrote NULL, returning -1)");
+
 		if (outputAddress != 0)
 		{
 			_ = TryWriteUInt64Compat(outputAddress, 0);
@@ -1926,7 +1945,12 @@ public sealed partial class DirectExecutionBackend
 		}
 		catch
 		{
-			return CompleteKernelDynlibDlsymFailure(cpuContext, outputAddress);
+			return CompleteKernelDynlibDlsymFailure(
+				cpuContext,
+				cpuContext[CpuRegister.Rdi],
+				string.Empty,
+				cpuContext[CpuRegister.Rsi],
+				outputAddress);
 		}
 
 		return OrbisGen2Result.ORBIS_GEN2_OK;
