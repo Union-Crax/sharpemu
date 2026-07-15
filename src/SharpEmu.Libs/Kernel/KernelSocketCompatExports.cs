@@ -32,6 +32,34 @@ internal static class KernelSocketCompatExports
         }
     }
 
+    // Poll support: reports readiness without consuming data. A connected
+    // socket is always writable; readable only when buffered bytes exist.
+    internal static bool TryQuerySocketPollState(int fd, out bool readable, out bool writable)
+    {
+        readable = false;
+        writable = false;
+        EmulatedSocketState? state;
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out state))
+            {
+                return false;
+            }
+        }
+
+        writable = state.Connected;
+        try
+        {
+            readable = state.Connected && state.Stream is not null && state.Stream.DataAvailable;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            readable = false;
+        }
+
+        return true;
+    }
+
     internal static bool TryCloseSocketFd(int fd)
     {
         lock (Gate)

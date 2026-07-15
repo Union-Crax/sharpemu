@@ -467,6 +467,302 @@ public sealed class PosixKernelExportsTests : IDisposable
         Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
     }
 
+    [Fact]
+    public void Dup_SharesFileOffsetAndSurvivesCloseOfOriginal()
+    {
+        var hostPath = CreateHostFile("dup.bin", Encoding.ASCII.GetBytes("0123456789"));
+        var fd = OpenGuestFile(hostPath, flags: 0);
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+        Assert.Equal(0, KernelMemoryCompatExports.PosixDup(_ctx));
+        var dupFd = unchecked((int)_ctx[CpuRegister.Rax]);
+        Assert.NotEqual(fd, dupFd);
+
+        // Reading via the original advances the shared offset.
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 4;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+
+        CloseGuestFile(fd);
+
+        // The duplicate still works and continues at the shared offset.
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)dupFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 4;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Assert.Equal(4UL, _ctx[CpuRegister.Rax]);
+        Span<byte> readBack = stackalloc byte[4];
+        Assert.True(_memory.TryRead(BufferAddress, readBack));
+        Assert.Equal("4567", Encoding.ASCII.GetString(readBack));
+
+        CloseGuestFile(dupFd);
+    }
+
+    [Fact]
+    public void Dup2_RedirectsTargetDescriptor()
+    {
+        var firstPath = CreateHostFile("dup2-a.bin", Encoding.ASCII.GetBytes("AAAA"));
+        var secondPath = CreateHostFile("dup2-b.bin", Encoding.ASCII.GetBytes("BBBB"));
+        var firstFd = OpenGuestFile(firstPath, flags: 0);
+        var secondFd = OpenGuestFile(secondPath, flags: 0);
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)firstFd);
+        _ctx[CpuRegister.Rsi] = unchecked((ulong)secondFd);
+        Assert.Equal(0, KernelMemoryCompatExports.PosixDup2(_ctx));
+        Assert.Equal(unchecked((ulong)secondFd), _ctx[CpuRegister.Rax]);
+
+        // secondFd now reads the first file's contents.
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)secondFd);
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        _ctx[CpuRegister.Rdx] = 4;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelMemoryCompatExports.KernelReadUnderscore(_ctx));
+        Span<byte> readBack = stackalloc byte[4];
+        Assert.True(_memory.TryRead(BufferAddress, readBack));
+        Assert.Equal("AAAA", Encoding.ASCII.GetString(readBack));
+
+        CloseGuestFile(secondFd);
+        CloseGuestFile(firstFd);
+    }
+
+    [Fact]
+    public void Fcntl_SupportsDupfdAndGetflAndRejectsUnknownCommands()
+    {
+        var hostPath = CreateHostFile("fcntl.bin", Encoding.ASCII.GetBytes("data"));
+        var fd = OpenGuestFile(hostPath, flags: 0x2 /* O_RDWR */);
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+        _ctx[CpuRegister.Rsi] = 0; // F_DUPFD
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixFcntl(_ctx));
+        var dupFd = unchecked((int)_ctx[CpuRegister.Rax]);
+        Assert.NotEqual(fd, dupFd);
+        CloseGuestFile(dupFd);
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+        _ctx[CpuRegister.Rsi] = 3; // F_GETFL
+        Assert.Equal(0, KernelMemoryCompatExports.PosixFcntl(_ctx));
+        Assert.Equal(0x2UL, _ctx[CpuRegister.Rax]); // O_RDWR
+
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)fd);
+        _ctx[CpuRegister.Rsi] = 999;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixFcntl(_ctx));
+
+        CloseGuestFile(fd);
+    }
+
+    [Fact]
+    public void ChdirGetcwd_RoundTripsAndReportsErange()
+    {
+        var dirPath = Path.Combine(_tempRoot, "cwd-target");
+        Directory.CreateDirectory(dirPath);
+
+        _memory.WriteCString(PathAddress, dirPath);
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixChdir(_ctx));
+
+        _ctx[CpuRegister.Rdi] = BufferAddress;
+        _ctx[CpuRegister.Rsi] = 0x400;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixGetcwd(_ctx));
+        Assert.Equal(BufferAddress, _ctx[CpuRegister.Rax]);
+
+        var expected = "/" + string.Join('/', dirPath.Split('/', StringSplitOptions.RemoveEmptyEntries));
+        Span<byte> readBack = stackalloc byte[expected.Length];
+        Assert.True(_memory.TryRead(BufferAddress, readBack));
+        Assert.Equal(expected, Encoding.UTF8.GetString(readBack));
+
+        _ctx[CpuRegister.Rdi] = BufferAddress;
+        _ctx[CpuRegister.Rsi] = 2; // far too small
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixGetcwd(_ctx));
+    }
+
+    [Fact]
+    public void Sysconf_ReportsPageSizeAndRejectsUnknownNames()
+    {
+        _ctx[CpuRegister.Rdi] = 47; // _SC_PAGESIZE
+        Assert.Equal(0, KernelMemoryCompatExports.PosixSysconf(_ctx));
+        Assert.Equal(0x4000UL, _ctx[CpuRegister.Rax]);
+
+        _ctx[CpuRegister.Rdi] = 9999;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixSysconf(_ctx));
+        Assert.Equal(ulong.MaxValue, _ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void Getrlimit_WritesInfiniteLimits()
+    {
+        _ctx[CpuRegister.Rdi] = 8; // RLIMIT_NOFILE
+        _ctx[CpuRegister.Rsi] = StructAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixGetrlimit(_ctx));
+
+        Span<byte> payload = stackalloc byte[16];
+        Assert.True(_memory.TryRead(StructAddress, payload));
+        Assert.Equal((ulong)long.MaxValue, BinaryPrimitives.ReadUInt64LittleEndian(payload));
+        Assert.Equal((ulong)long.MaxValue, BinaryPrimitives.ReadUInt64LittleEndian(payload[8..]));
+    }
+
+    [Fact]
+    public void Sigaction_ZeroesOldActionAndValidatesSignal()
+    {
+        Span<byte> poison = stackalloc byte[32];
+        poison.Fill(0xFF);
+        Assert.True(_memory.TryWrite(StructAddress, poison));
+
+        _ctx[CpuRegister.Rdi] = 11; // SIGSEGV
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = StructAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixSigaction(_ctx));
+
+        Span<byte> oldAction = stackalloc byte[32];
+        Assert.True(_memory.TryRead(StructAddress, oldAction));
+        Assert.True(oldAction.IndexOfAnyExcept((byte)0) < 0);
+
+        _ctx[CpuRegister.Rdi] = 0;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixSigaction(_ctx));
+    }
+
+    [Fact]
+    public void ClockGetres_WritesResolutionForKnownClock()
+    {
+        _ctx[CpuRegister.Rdi] = 0; // CLOCK_REALTIME
+        _ctx[CpuRegister.Rsi] = StructAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixClockGetres(_ctx));
+
+        Span<byte> payload = stackalloc byte[16];
+        Assert.True(_memory.TryRead(StructAddress, payload));
+        Assert.Equal(0L, BinaryPrimitives.ReadInt64LittleEndian(payload));
+        Assert.Equal(100L, BinaryPrimitives.ReadInt64LittleEndian(payload[8..]));
+    }
+
+    [Fact]
+    public void Poll_MarksFileDescriptorsReadyAndFlagsBadOnes()
+    {
+        var hostPath = CreateHostFile("poll.bin", Encoding.ASCII.GetBytes("x"));
+        var fd = OpenGuestFile(hostPath, flags: 0);
+
+        // Entry 0: real file, POLLIN|POLLOUT. Entry 1: bogus fd. Entry 2: fd -1.
+        WritePollFd(StructAddress, 0, fd, 0x0005);
+        WritePollFd(StructAddress, 1, 0x7000, 0x0001);
+        WritePollFd(StructAddress, 2, -1, 0x0001);
+
+        _ctx[CpuRegister.Rdi] = StructAddress;
+        _ctx[CpuRegister.Rsi] = 3;
+        _ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixPoll(_ctx));
+        Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
+
+        Assert.Equal(0x0005, ReadPollRevents(StructAddress, 0));
+        Assert.Equal(0x0020, ReadPollRevents(StructAddress, 1)); // POLLNVAL
+        Assert.Equal(0, ReadPollRevents(StructAddress, 2));
+
+        CloseGuestFile(fd);
+    }
+
+    [Fact]
+    public void Umask_ReturnsPreviousMask()
+    {
+        _ctx[CpuRegister.Rdi] = 0x17; // 027
+        Assert.Equal(0, KernelMemoryCompatExports.PosixUmask(_ctx));
+        var previous = _ctx[CpuRegister.Rax];
+
+        _ctx[CpuRegister.Rdi] = previous;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixUmask(_ctx));
+        Assert.Equal(0x17UL, _ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void Realpath_CollapsesDotSegments()
+    {
+        var subDir = Path.Combine(_tempRoot, "sub");
+        Directory.CreateDirectory(subDir);
+        var filePath = CreateHostFile("real.bin", [1]);
+
+        _memory.WriteCString(PathAddress, $"{_tempRoot}/sub/.././real.bin");
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        _ctx[CpuRegister.Rsi] = BufferAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixRealpath(_ctx));
+        Assert.Equal(BufferAddress, _ctx[CpuRegister.Rax]);
+
+        var expected = "/" + string.Join('/', filePath.Split('/', StringSplitOptions.RemoveEmptyEntries));
+        Span<byte> readBack = stackalloc byte[expected.Length];
+        Assert.True(_memory.TryRead(BufferAddress, readBack));
+        Assert.Equal(expected, Encoding.UTF8.GetString(readBack));
+    }
+
+    [Fact]
+    public void ShmOpen_CreatesReopensAndUnlinks()
+    {
+        var name = $"/sharpemu-test-{Environment.ProcessId}-{Guid.NewGuid():N}";
+        _memory.WriteCString(PathAddress, name);
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        _ctx[CpuRegister.Rsi] = 0x0202; // O_CREAT | O_RDWR
+        _ctx[CpuRegister.Rdx] = 0x1B6;  // 0666
+        Assert.Equal(0, KernelMemoryCompatExports.PosixShmOpen(_ctx));
+        var fd = unchecked((int)_ctx[CpuRegister.Rax]);
+        Assert.True(fd > 2);
+        CloseGuestFile(fd);
+
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        _ctx[CpuRegister.Rsi] = 0x2; // O_RDWR, no O_CREAT: must already exist
+        Assert.Equal(0, KernelMemoryCompatExports.PosixShmOpen(_ctx));
+        CloseGuestFile(unchecked((int)_ctx[CpuRegister.Rax]));
+
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixShmUnlink(_ctx));
+
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        _ctx[CpuRegister.Rsi] = 0x2;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixShmOpen(_ctx));
+    }
+
+    [Fact]
+    public void Utimes_SetsFileTimesFromTimevals()
+    {
+        var hostPath = CreateHostFile("utimes.bin", [1]);
+        _memory.WriteCString(PathAddress, hostPath);
+
+        Span<byte> times = stackalloc byte[32];
+        BinaryPrimitives.WriteUInt64LittleEndian(times, 1_000_000_000);      // atime sec
+        BinaryPrimitives.WriteUInt64LittleEndian(times[8..], 0);             // atime usec
+        BinaryPrimitives.WriteUInt64LittleEndian(times[16..], 1_500_000_000); // mtime sec
+        BinaryPrimitives.WriteUInt64LittleEndian(times[24..], 500_000);       // mtime usec
+        Assert.True(_memory.TryWrite(StructAddress, times));
+
+        _ctx[CpuRegister.Rdi] = PathAddress;
+        _ctx[CpuRegister.Rsi] = StructAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixUtimes(_ctx));
+
+        var expected = DateTime.UnixEpoch.AddSeconds(1_500_000_000).AddTicks(500_000 * 10);
+        Assert.Equal(expected, File.GetLastWriteTimeUtc(hostPath));
+    }
+
+    [Fact]
+    public void ProcessIdentityStubsReportUnprivilegedValues()
+    {
+        Assert.Equal(0, KernelMemoryCompatExports.PosixGetuid(_ctx));
+        Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
+        Assert.Equal(0, KernelMemoryCompatExports.PosixIssetugid(_ctx));
+        Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
+        Assert.Equal(0, KernelMemoryCompatExports.PosixGetppid(_ctx));
+        Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
+    }
+
+    private void WritePollFd(ulong tableAddress, int index, int fd, short events)
+    {
+        Span<byte> entry = stackalloc byte[8];
+        BinaryPrimitives.WriteInt32LittleEndian(entry, fd);
+        BinaryPrimitives.WriteInt16LittleEndian(entry[4..], events);
+        BinaryPrimitives.WriteInt16LittleEndian(entry[6..], unchecked((short)0x7777)); // poisoned revents
+        Assert.True(_memory.TryWrite(tableAddress + ((ulong)index * 8UL), entry));
+    }
+
+    private short ReadPollRevents(ulong tableAddress, int index)
+    {
+        Span<byte> revents = stackalloc byte[2];
+        Assert.True(_memory.TryRead(tableAddress + ((ulong)index * 8UL) + 6, revents));
+        return BinaryPrimitives.ReadInt16LittleEndian(revents);
+    }
+
     private void WriteIoVector(ulong tableAddress, int index, ulong baseAddress, ulong length)
     {
         Span<byte> entry = stackalloc byte[16];

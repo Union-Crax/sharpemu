@@ -2258,6 +2258,12 @@ public static partial class KernelMemoryCompatExports
         {
             if (_openFiles.Remove(fd, out stream))
             {
+                // dup/dup2 alias several descriptors onto one stream; only the
+                // last close may dispose it.
+                if (_openFiles.ContainsValue(stream))
+                {
+                    stream = null;
+                }
             }
             else if (_openDirectories.Remove(fd))
             {
@@ -2270,7 +2276,7 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        stream.Dispose();
+        stream?.Dispose();
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

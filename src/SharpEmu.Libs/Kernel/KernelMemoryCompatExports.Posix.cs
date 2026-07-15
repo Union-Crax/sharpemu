@@ -1201,4 +1201,991 @@ public static partial class KernelMemoryCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    // ------------------------------------------------------------------
+    // Descriptor duplication: dup / dup2 / fcntl
+    // ------------------------------------------------------------------
+
+    private const int FcntlDupFd = 0;
+    private const int FcntlGetFd = 1;
+    private const int FcntlSetFd = 2;
+    private const int FcntlGetFl = 3;
+    private const int FcntlSetFl = 4;
+    private const int FcntlDupFdCloexec = 17;
+
+    private static bool TryDuplicateDescriptor(int fd, out int newFd)
+    {
+        lock (_fdGate)
+        {
+            if (!_openFiles.TryGetValue(fd, out var stream))
+            {
+                newFd = -1;
+                return false;
+            }
+
+            newFd = AllocateGuestFileDescriptor();
+            _openFiles[newFd] = stream;
+            return true;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "iiQjzvfWDq0",
+        ExportName = "dup",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixDup(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!TryDuplicateDescriptor(fd, out var newFd))
+        {
+            return PosixFail(ctx, Ebadf);
+        }
+
+        LogIoTrace("dup", $"fd:{fd}", $"new_fd={newFd}");
+        return PosixOk(ctx, unchecked((ulong)newFd));
+    }
+
+    [SysAbiExport(
+        Nid = "wdUufa9g-D8",
+        ExportName = "dup2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixDup2(CpuContext ctx)
+    {
+        var oldFd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var newFd = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (newFd < 0)
+        {
+            return PosixFail(ctx, Ebadf);
+        }
+
+        FileStream? displaced = null;
+        lock (_fdGate)
+        {
+            if (!_openFiles.TryGetValue(oldFd, out var stream))
+            {
+                return PosixFail(ctx, Ebadf);
+            }
+
+            if (newFd == oldFd)
+            {
+                return PosixOk(ctx, unchecked((ulong)newFd));
+            }
+
+            // Std descriptors keep their console routing (_read/_write check
+            // fd 0/1/2 before this table), so aliasing onto them is a no-op.
+            if (newFd is 0 or 1 or 2)
+            {
+                return PosixOk(ctx, unchecked((ulong)newFd));
+            }
+
+            if (_openFiles.Remove(newFd, out var existing) &&
+                !ReferenceEquals(existing, stream) &&
+                !_openFiles.ContainsValue(existing))
+            {
+                displaced = existing;
+            }
+
+            _openDirectories.Remove(newFd);
+            _openFiles[newFd] = stream;
+        }
+
+        displaced?.Dispose();
+        LogIoTrace("dup2", $"fd:{oldFd}", $"new_fd={newFd}");
+        return PosixOk(ctx, unchecked((ulong)newFd));
+    }
+
+    [SysAbiExport(
+        Nid = "8nY19bKoiZk",
+        ExportName = "fcntl",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixFcntl(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var command = unchecked((int)ctx[CpuRegister.Rsi]);
+        switch (command)
+        {
+            case FcntlDupFd:
+            case FcntlDupFdCloexec:
+                if (!TryDuplicateDescriptor(fd, out var newFd))
+                {
+                    return PosixFail(ctx, Ebadf);
+                }
+
+                return PosixOk(ctx, unchecked((ulong)newFd));
+
+            case FcntlGetFd:
+            case FcntlSetFd:
+            case FcntlSetFl:
+                if (!TryGetOpenFileStream(fd, out _) && !KernelSocketCompatExports.IsEmulatedSocketFd(fd))
+                {
+                    return PosixFail(ctx, Ebadf);
+                }
+
+                return PosixOk(ctx);
+
+            case FcntlGetFl:
+                if (TryGetOpenFileStream(fd, out var stream))
+                {
+                    var flags = stream.CanRead && stream.CanWrite
+                        ? O_RDWR
+                        : stream.CanWrite
+                            ? O_WRONLY
+                            : 0;
+                    return PosixOk(ctx, unchecked((ulong)flags));
+                }
+
+                if (KernelSocketCompatExports.IsEmulatedSocketFd(fd))
+                {
+                    return PosixOk(ctx, O_RDWR);
+                }
+
+                return PosixFail(ctx, Ebadf);
+
+            default:
+                LogIoTrace("fcntl", $"fd:{fd}", $"cmd={command} result=unsupported");
+                return PosixFail(ctx, Einval);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Working directory bookkeeping
+    // ------------------------------------------------------------------
+
+    private static readonly object _cwdGate = new();
+    private static string _guestWorkingDirectory = "/app0";
+
+    private static string NormalizeGuestAbsolutePath(string path, string currentDirectory)
+    {
+        var combined = path.StartsWith('/') ? path : currentDirectory + "/" + path;
+        var segments = new List<string>();
+        foreach (var segment in combined.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            switch (segment)
+            {
+                case ".":
+                    break;
+                case "..":
+                    if (segments.Count > 0)
+                    {
+                        segments.RemoveAt(segments.Count - 1);
+                    }
+
+                    break;
+                default:
+                    segments.Add(segment);
+                    break;
+            }
+        }
+
+        return "/" + string.Join('/', segments);
+    }
+
+    [SysAbiExport(
+        Nid = "DYivN1nO-JQ",
+        ExportName = "getcwd",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetcwd(CpuContext ctx)
+    {
+        var bufferAddress = ctx[CpuRegister.Rdi];
+        var bufferSize = ctx[CpuRegister.Rsi];
+        if (bufferAddress == 0)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        string currentDirectory;
+        lock (_cwdGate)
+        {
+            currentDirectory = _guestWorkingDirectory;
+        }
+
+        var payload = System.Text.Encoding.UTF8.GetBytes(currentDirectory);
+        if ((ulong)payload.Length + 1 > bufferSize)
+        {
+            return PosixFail(ctx, Erange);
+        }
+
+        Span<byte> terminated = stackalloc byte[payload.Length + 1];
+        payload.CopyTo(terminated);
+        terminated[^1] = 0;
+        if (!ctx.Memory.TryWrite(bufferAddress, terminated))
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        return PosixOk(ctx, bufferAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "6mMQ1MSPW-Q",
+        ExportName = "chdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixChdir(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath) ||
+            guestPath.Length == 0)
+        {
+            return PosixFail(ctx, pathAddress == 0 ? Einval : Efault);
+        }
+
+        string normalized;
+        lock (_cwdGate)
+        {
+            normalized = NormalizeGuestAbsolutePath(guestPath, _guestWorkingDirectory);
+        }
+
+        var hostPath = ResolveGuestPath(normalized);
+        if (!Directory.Exists(hostPath))
+        {
+            return PosixFail(ctx, Enoent);
+        }
+
+        lock (_cwdGate)
+        {
+            _guestWorkingDirectory = normalized;
+        }
+
+        LogIoTrace("chdir", guestPath, $"cwd='{normalized}'");
+        return PosixOk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "gnyVA6Tj-ak",
+        ExportName = "fchdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixFchdir(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_fdGate)
+        {
+            if (!_openDirectories.ContainsKey(fd))
+            {
+                return PosixFail(ctx, Ebadf);
+            }
+        }
+
+        // Directory descriptors only carry host paths; guest-relative path
+        // resolution never consults the tracked cwd, so accepting is enough.
+        return PosixOk(ctx);
+    }
+
+    // ------------------------------------------------------------------
+    // Process identity, limits, sysconf
+    // ------------------------------------------------------------------
+
+    private static readonly object _umaskGate = new();
+    private static int _processUmask = 0x12; // 022
+
+    [SysAbiExport(
+        Nid = "kg4x8Prhfxw",
+        ExportName = "getuid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetuid(CpuContext ctx) => PosixOk(ctx);
+
+    [SysAbiExport(
+        Nid = "tvpHe5kBO4E",
+        ExportName = "geteuid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGeteuid(CpuContext ctx) => PosixOk(ctx);
+
+    [SysAbiExport(
+        Nid = "AfuS23bX6kg",
+        ExportName = "getgid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetgid(CpuContext ctx) => PosixOk(ctx);
+
+    [SysAbiExport(
+        Nid = "72rYuYoDTWk",
+        ExportName = "getegid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetegid(CpuContext ctx) => PosixOk(ctx);
+
+    [SysAbiExport(
+        Nid = "AxUhC3zNrhk",
+        ExportName = "issetugid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixIssetugid(CpuContext ctx) => PosixOk(ctx, 1);
+
+    [SysAbiExport(
+        Nid = "e6ovBo9ZvJc",
+        ExportName = "getppid",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetppid(CpuContext ctx) => PosixOk(ctx, 1);
+
+    [SysAbiExport(
+        Nid = "Rb6ziJKvCCQ",
+        ExportName = "umask",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixUmask(CpuContext ctx)
+    {
+        var requested = unchecked((int)ctx[CpuRegister.Rdi]) & 0x1FF;
+        int previous;
+        lock (_umaskGate)
+        {
+            previous = _processUmask;
+            _processUmask = requested;
+        }
+
+        return PosixOk(ctx, unchecked((ulong)previous));
+    }
+
+    [SysAbiExport(
+        Nid = "Wh7HbV7JFqc",
+        ExportName = "getrlimit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetrlimit(CpuContext ctx)
+    {
+        var resource = unchecked((int)ctx[CpuRegister.Rdi]);
+        var limitAddress = ctx[CpuRegister.Rsi];
+        if (resource is < 0 or > 15 || limitAddress == 0)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        // { rlim_cur, rlim_max } both RLIM_INFINITY.
+        Span<byte> payload = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt64LittleEndian(payload, long.MaxValue);
+        BinaryPrimitives.WriteUInt64LittleEndian(payload[8..], long.MaxValue);
+        if (!ctx.Memory.TryWrite(limitAddress, payload))
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        return PosixOk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "4X0QwvuCfjc",
+        ExportName = "setrlimit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSetrlimit(CpuContext ctx)
+    {
+        var resource = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (resource is < 0 or > 15)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        return PosixOk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "hHlZQUnlxSM",
+        ExportName = "getrusage",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixGetrusage(CpuContext ctx)
+    {
+        var usageAddress = ctx[CpuRegister.Rsi];
+        if (usageAddress == 0)
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        // struct rusage: 2 timevals + 14 longs = 0x90 bytes, all zero.
+        Span<byte> payload = stackalloc byte[0x90];
+        payload.Clear();
+        if (!ctx.Memory.TryWrite(usageAddress, payload))
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        return PosixOk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "mkawd0NA9ts",
+        ExportName = "sysconf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSysconf(CpuContext ctx)
+    {
+        // FreeBSD numbering.
+        const int ScClkTck = 3;
+        const int ScPagesize = 47;
+        const int ScNprocessorsConf = 57;
+        const int ScNprocessorsOnln = 58;
+
+        var name = unchecked((int)ctx[CpuRegister.Rdi]);
+        switch (name)
+        {
+            case ScPagesize:
+                return PosixOk(ctx, OrbisPageSize);
+            case ScClkTck:
+                return PosixOk(ctx, 128);
+            case ScNprocessorsConf:
+            case ScNprocessorsOnln:
+                return PosixOk(ctx, 14);
+            default:
+                LogIoTrace("sysconf", $"name:{name}", "result=unsupported");
+                return PosixFail(ctx, Einval);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Signals redux: sigaction, pthread_atfork
+    // ------------------------------------------------------------------
+
+    [SysAbiExport(
+        Nid = "KiJEPEWRyUY",
+        ExportName = "sigaction",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSigaction(CpuContext ctx)
+    {
+        var signal = unchecked((int)ctx[CpuRegister.Rdi]);
+        var oldActionAddress = ctx[CpuRegister.Rdx];
+        if (signal is < 1 or > 128)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        if (oldActionAddress != 0)
+        {
+            // struct sigaction: handler + flags + mask = 32 bytes; report
+            // SIG_DFL with an empty mask.
+            Span<byte> emptyAction = stackalloc byte[32];
+            emptyAction.Clear();
+            if (!ctx.Memory.TryWrite(oldActionAddress, emptyAction))
+            {
+                return PosixFail(ctx, Efault);
+            }
+        }
+
+        return PosixOk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "U9t5kJAWPnA",
+        ExportName = "pthread_atfork",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadAtfork(CpuContext ctx)
+    {
+        // The HLE kernel never forks, so the registered handlers can never run.
+        return PosixOk(ctx);
+    }
+
+    // ------------------------------------------------------------------
+    // Clock resolution
+    // ------------------------------------------------------------------
+
+    private static OrbisGen2Result ClockGetresCore(CpuContext ctx, int clockId, ulong timespecAddress, out int errno)
+    {
+        errno = 0;
+        if (!KernelRuntimeCompatExports.ResolveClockTime(clockId, out _, out _))
+        {
+            errno = Einval;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (timespecAddress != 0)
+        {
+            Span<byte> payload = stackalloc byte[16];
+            BinaryPrimitives.WriteInt64LittleEndian(payload, 0);
+            BinaryPrimitives.WriteInt64LittleEndian(payload[8..], 100); // 100 ns tick
+            if (!ctx.Memory.TryWrite(timespecAddress, payload))
+            {
+                errno = Efault;
+                return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        return OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "smIj7eqzZE8",
+        ExportName = "clock_getres",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixClockGetres(CpuContext ctx)
+    {
+        var result = ClockGetresCore(ctx, unchecked((int)ctx[CpuRegister.Rdi]), ctx[CpuRegister.Rsi], out var errno);
+        return result == OrbisGen2Result.ORBIS_GEN2_OK ? PosixOk(ctx) : PosixFail(ctx, errno);
+    }
+
+    [SysAbiExport(
+        Nid = "wRYVA5Zolso",
+        ExportName = "sceKernelClockGetres",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelClockGetres(CpuContext ctx)
+    {
+        var result = ClockGetresCore(ctx, unchecked((int)ctx[CpuRegister.Rdi]), ctx[CpuRegister.Rsi], out _);
+        if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return (int)result;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // ------------------------------------------------------------------
+    // poll
+    // ------------------------------------------------------------------
+
+    private const short PollIn = 0x0001;
+    private const short PollOut = 0x0004;
+    private const short PollRdNorm = 0x0040;
+    private const short PollWrNorm = 0x0004;
+    private const short PollNval = 0x0020;
+
+    [SysAbiExport(
+        Nid = "ku7D4q1Y9PI",
+        ExportName = "poll",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPoll(CpuContext ctx)
+    {
+        var fdsAddress = ctx[CpuRegister.Rdi];
+        var fdCount = unchecked((int)ctx[CpuRegister.Rsi]);
+        var timeoutMilliseconds = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (fdCount < 0 || fdCount > MaxIoVectorCount)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        if (fdCount > 0 && fdsAddress == 0)
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        var ready = ScanPollDescriptors(ctx, fdsAddress, fdCount, out var faulted);
+        if (faulted)
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        if (ready == 0 && timeoutMilliseconds != 0)
+        {
+            // Bounded wait: never park the guest thread indefinitely here.
+            var sleep = timeoutMilliseconds < 0 ? 10 : Math.Min(timeoutMilliseconds, 10);
+            GuestThreadExecution.Scheduler?.Pump(ctx, "poll");
+            Thread.Sleep(sleep);
+            ready = ScanPollDescriptors(ctx, fdsAddress, fdCount, out faulted);
+            if (faulted)
+            {
+                return PosixFail(ctx, Efault);
+            }
+        }
+
+        return PosixOk(ctx, unchecked((ulong)ready));
+    }
+
+    private static int ScanPollDescriptors(CpuContext ctx, ulong fdsAddress, int fdCount, out bool faulted)
+    {
+        faulted = false;
+        var ready = 0;
+        for (var i = 0; i < fdCount; i++)
+        {
+            // struct pollfd { int fd; short events; short revents; }
+            var entryAddress = fdsAddress + ((ulong)i * 8UL);
+            if (!ctx.TryReadInt32(entryAddress, out var fd) ||
+                !ctx.TryReadUInt16(entryAddress + 4, out var eventsRaw))
+            {
+                faulted = true;
+                return 0;
+            }
+
+            var events = unchecked((short)eventsRaw);
+            short revents = 0;
+            if (fd >= 0)
+            {
+                if (TryGetOpenFileStream(fd, out _))
+                {
+                    // Regular files never block.
+                    revents = (short)(events & (PollIn | PollOut | PollRdNorm | PollWrNorm));
+                }
+                else if (KernelSocketCompatExports.TryQuerySocketPollState(fd, out var readable, out var writable))
+                {
+                    if (readable)
+                    {
+                        revents |= (short)(events & (PollIn | PollRdNorm));
+                    }
+
+                    if (writable)
+                    {
+                        revents |= (short)(events & (PollOut | PollWrNorm));
+                    }
+                }
+                else if (fd is not (0 or 1 or 2))
+                {
+                    revents = PollNval;
+                }
+                else
+                {
+                    revents = (short)(events & (PollIn | PollOut));
+                }
+            }
+
+            if (!ctx.TryWriteUInt16(entryAddress + 6, unchecked((ushort)revents)))
+            {
+                faulted = true;
+                return 0;
+            }
+
+            if (revents != 0)
+            {
+                ready++;
+            }
+        }
+
+        return ready;
+    }
+
+    // ------------------------------------------------------------------
+    // flock / fchmod / utimes
+    // ------------------------------------------------------------------
+
+    private static OrbisGen2Result FlockCore(int fd, out int errno)
+    {
+        errno = 0;
+        if (!TryGetOpenFileStream(fd, out _))
+        {
+            errno = Ebadf;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        // Advisory locks have no cross-process peer inside the emulator.
+        return OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "9eMlfusH4sU",
+        ExportName = "flock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixFlock(CpuContext ctx)
+    {
+        var result = FlockCore(unchecked((int)ctx[CpuRegister.Rdi]), out var errno);
+        return result == OrbisGen2Result.ORBIS_GEN2_OK ? PosixOk(ctx) : PosixFail(ctx, errno);
+    }
+
+    [SysAbiExport(
+        Nid = "YDg-SQj66AQ",
+        ExportName = "sceKernelFlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelFlock(CpuContext ctx)
+    {
+        var result = FlockCore(unchecked((int)ctx[CpuRegister.Rdi]), out _);
+        if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return (int)result;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "n01yNbQO5W4",
+        ExportName = "fchmod",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixFchmod(CpuContext ctx)
+    {
+        // POSIX permission bits have no host equivalent here; see sceKernelChmod.
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        return TryGetOpenFileStream(fd, out _) ? PosixOk(ctx) : PosixFail(ctx, Ebadf);
+    }
+
+    private static OrbisGen2Result UtimesCore(CpuContext ctx, ulong pathAddress, ulong timesAddress, out int errno)
+    {
+        errno = 0;
+        if (pathAddress == 0)
+        {
+            errno = Einval;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            errno = Efault;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            errno = Eacces;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        var isDirectory = Directory.Exists(hostPath);
+        if (!isDirectory && !File.Exists(hostPath))
+        {
+            errno = Enoent;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var accessTime = DateTime.UtcNow;
+        var writeTime = accessTime;
+        if (timesAddress != 0)
+        {
+            // struct timeval[2]: {access, modification}, each {sec, usec} int64.
+            if (!ctx.TryReadUInt64(timesAddress, out var accessSeconds) ||
+                !ctx.TryReadUInt64(timesAddress + 8, out var accessMicros) ||
+                !ctx.TryReadUInt64(timesAddress + 16, out var writeSeconds) ||
+                !ctx.TryReadUInt64(timesAddress + 24, out var writeMicros))
+            {
+                errno = Efault;
+                return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            accessTime = ConvertTimevalToUtc(accessSeconds, accessMicros);
+            writeTime = ConvertTimevalToUtc(writeSeconds, writeMicros);
+        }
+
+        try
+        {
+            if (isDirectory)
+            {
+                Directory.SetLastAccessTimeUtc(hostPath, accessTime);
+                Directory.SetLastWriteTimeUtc(hostPath, writeTime);
+            }
+            else
+            {
+                File.SetLastAccessTimeUtc(hostPath, accessTime);
+                File.SetLastWriteTimeUtc(hostPath, writeTime);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
+        {
+            errno = Eacces;
+            return OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        return OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static DateTime ConvertTimevalToUtc(ulong seconds, ulong microseconds)
+    {
+        var clampedSeconds = Math.Min(seconds, 253_402_300_799UL); // year 9999
+        var clampedMicros = Math.Min(microseconds, 999_999UL);
+        return DateTime.UnixEpoch
+            .AddSeconds(clampedSeconds)
+            .AddTicks((long)clampedMicros * 10);
+    }
+
+    [SysAbiExport(
+        Nid = "GDuV00CHrUg",
+        ExportName = "utimes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixUtimes(CpuContext ctx)
+    {
+        var result = UtimesCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], out var errno);
+        return result == OrbisGen2Result.ORBIS_GEN2_OK ? PosixOk(ctx) : PosixFail(ctx, errno);
+    }
+
+    [SysAbiExport(
+        Nid = "0Cq8ipKr9n0",
+        ExportName = "sceKernelUtimes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUtimes(CpuContext ctx)
+    {
+        var result = UtimesCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], out _);
+        if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return (int)result;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "+0EDo7YzcoU",
+        ExportName = "futimes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixFutimes(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        return TryGetOpenFileStream(fd, out _) ? PosixOk(ctx) : PosixFail(ctx, Ebadf);
+    }
+
+    // ------------------------------------------------------------------
+    // realpath
+    // ------------------------------------------------------------------
+
+    [SysAbiExport(
+        Nid = "vhtcIgZG-Lk",
+        ExportName = "realpath",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixRealpath(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        var resolvedAddress = ctx[CpuRegister.Rsi];
+        if (pathAddress == 0 || resolvedAddress == 0)
+        {
+            // realpath(path, NULL) would have to malloc in the guest; unsupported.
+            return PosixFail(ctx, Einval);
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath) ||
+            guestPath.Length == 0)
+        {
+            return PosixFail(ctx, guestPath is { Length: 0 } ? Enoent : Efault);
+        }
+
+        string normalized;
+        lock (_cwdGate)
+        {
+            normalized = NormalizeGuestAbsolutePath(guestPath, _guestWorkingDirectory);
+        }
+
+        var hostPath = ResolveGuestPath(normalized);
+        if (!File.Exists(hostPath) && !Directory.Exists(hostPath))
+        {
+            return PosixFail(ctx, Enoent);
+        }
+
+        var payload = System.Text.Encoding.UTF8.GetBytes(normalized);
+        Span<byte> terminated = payload.Length < 1024 ? stackalloc byte[payload.Length + 1] : new byte[payload.Length + 1];
+        payload.CopyTo(terminated);
+        terminated[^1] = 0;
+        if (!ctx.Memory.TryWrite(resolvedAddress, terminated))
+        {
+            return PosixFail(ctx, Efault);
+        }
+
+        return PosixOk(ctx, resolvedAddress);
+    }
+
+    // ------------------------------------------------------------------
+    // POSIX shared memory
+    // ------------------------------------------------------------------
+
+    private const int O_EXCL = 0x0800;
+
+    private static string ResolveSharedMemoryHostPath(string name)
+    {
+        var builder = new System.Text.StringBuilder(name.Length);
+        foreach (var ch in name)
+        {
+            builder.Append(char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.' ? ch : '_');
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-shm");
+        Directory.CreateDirectory(directory);
+        return Path.Combine(directory, builder.ToString());
+    }
+
+    [SysAbiExport(
+        Nid = "QuJYZ2KVGGQ",
+        ExportName = "shm_open",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixShmOpen(CpuContext ctx)
+    {
+        var nameAddress = ctx[CpuRegister.Rdi];
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (nameAddress == 0)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxGuestStringLength, out var name) ||
+            name.Length == 0)
+        {
+            return PosixFail(ctx, name is { Length: 0 } ? Einval : Efault);
+        }
+
+        var hostPath = ResolveSharedMemoryHostPath(name);
+        var exists = File.Exists(hostPath);
+        if ((flags & O_CREAT) == 0 && !exists)
+        {
+            return PosixFail(ctx, Enoent);
+        }
+
+        if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL) && exists)
+        {
+            return PosixFail(ctx, Eexist);
+        }
+
+        try
+        {
+            var access = ResolveOpenAccess(flags) == FileAccess.Read ? FileAccess.Read : FileAccess.ReadWrite;
+            var stream = new FileStream(hostPath, ResolveOpenMode(flags, access), access, FileShare.ReadWrite);
+            int fd;
+            lock (_fdGate)
+            {
+                fd = AllocateGuestFileDescriptor();
+                _openFiles[fd] = stream;
+            }
+
+            LogIoTrace("shm_open", name, $"host='{hostPath}' flags=0x{flags:X} fd={fd}");
+            return PosixOk(ctx, unchecked((ulong)fd));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogIoTrace("shm_open", name, $"host='{hostPath}' flags=0x{flags:X} ex={ex.GetType().Name}");
+            return PosixFail(ctx, Eacces);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "tPWsbOUGO8k",
+        ExportName = "shm_unlink",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixShmUnlink(CpuContext ctx)
+    {
+        var nameAddress = ctx[CpuRegister.Rdi];
+        if (nameAddress == 0)
+        {
+            return PosixFail(ctx, Einval);
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxGuestStringLength, out var name) ||
+            name.Length == 0)
+        {
+            return PosixFail(ctx, name is { Length: 0 } ? Einval : Efault);
+        }
+
+        var hostPath = ResolveSharedMemoryHostPath(name);
+        if (!File.Exists(hostPath))
+        {
+            return PosixFail(ctx, Enoent);
+        }
+
+        try
+        {
+            File.Delete(hostPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogIoTrace("shm_unlink", name, $"host='{hostPath}' ex={ex.GetType().Name}");
+            return PosixFail(ctx, Eacces);
+        }
+
+        return PosixOk(ctx);
+    }
 }
