@@ -12,7 +12,7 @@ Delete this file once it's stale/no longer useful.
 ## Where things stand
 
 - Working branch: `claude/emu-compatibility-fixes-mgd423`, based on `main` @ `9d88542`.
-- PR open: https://github.com/Union-Crax/sharpemu/pull/1 (not yet merged, not yet
+- PR open: https://github.com/Union-Crax/hyper5/pull/1 (not yet merged, not yet
   reviewed as of this writing).
 - 4 commits on the branch, all pushed:
   1. `ffb15a5` — 36 exports: pread/pwrite, readv/writev, fsync/ftruncate/truncate,
@@ -31,7 +31,7 @@ Delete this file once it's stale/no longer useful.
 
 All of this was written and verified **without ever running a real game** — every
 new export was checked against `scripts/check_sysabi_aerolib.py` (NID correctness)
-and covered by unit tests in `tests/SharpEmu.Libs.Tests/Kernel/PosixKernelExportsTests.cs`
+and covered by unit tests in `tests/Hyper5.Libs.Tests/Kernel/PosixKernelExportsTests.cs`
 (40+ tests using `CpuContext` + a `FakeGuestAddressSpaceMemory`/`FakeCpuMemory` test
 double, no real ELF/game loaded). That's the ceiling of what's testable without a game
 — logic correctness, register conventions, NID correctness. It is **not** proof any
@@ -41,7 +41,7 @@ game actually gets further. That's the next step.
 
 1. **Rebase/merge check first.** If `main` moved since `9d88542`, rebase the branch
    before testing so you're not chasing bugs that were already fixed upstream.
-2. Run a game per `README.md` (`.\SharpEmu "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
+2. Run a game per `README.md` (`.\Hyper5 "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
    on Windows — this repo's primary target is Windows, this session worked in a Linux
    container which is why nothing end-to-end ran).
 3. Grep the log for these patterns — they are the actual compatibility signal:
@@ -58,9 +58,9 @@ game actually gets further. That's the next step.
      but not for the right `Generation` (Gen4 vs Gen5) target.
 4. **Env vars that turn on verbose tracing** for the new subsystems (see
    `KernelMemoryCompatExports.Posix.cs` / `KernelPipeCompatExports.cs` for the
-   exact checks): `SHARPEMU_LOG_PIPES=1` is new from this session. Pre-existing:
-   `SHARPEMU_LOG_SEMA`, `SHARPEMU_LOG_EVENT_FLAG`, `SHARPEMU_LOG_PTHREADS`,
-   `SHARPEMU_LOG_PTHREAD_CONDS`, `SHARPEMU_LOG_WIDE`, `SHARPEMU_LOG_FIBER`. Check
+   exact checks): `HYPER5_LOG_PIPES=1` is new from this session. Pre-existing:
+   `HYPER5_LOG_SEMA`, `HYPER5_LOG_EVENT_FLAG`, `HYPER5_LOG_PTHREADS`,
+   `HYPER5_LOG_PTHREAD_CONDS`, `HYPER5_LOG_WIDE`, `HYPER5_LOG_FIBER`. Check
    `MainWindow.axaml.cs` GUI "Environment" tab (added in #189) for the full toggle list.
 
 ## Known gaps / things I deliberately didn't implement, and why
@@ -98,10 +98,10 @@ game actually gets further. That's the next step.
 
 - HLE exports are static methods tagged `[SysAbiExport(Nid=..., ExportName=..., Target=...,
   LibraryName=...)]` on `CpuContext ctx`, registered by reflection in
-  `SharpEmu.HLE/ModuleManager.cs`. NIDs are `base64(sha1(name + fixed_salt)[:8])` —
+  `Hyper5.HLE/ModuleManager.cs`. NIDs are `base64(sha1(name + fixed_salt)[:8])` —
   see `name2nid()` in `scripts/generate_aerolib_binary.py`, and always verify new NIDs
   with `python3 scripts/check_sysabi_aerolib.py` before committing (checks against
-  `src/SharpEmu.HLE/Aerolib/aerolib.bin`, generated from `scripts/ps5_names.txt`).
+  `src/Hyper5.HLE/Aerolib/aerolib.bin`, generated from `scripts/ps5_names.txt`).
 - Convention split I used throughout: POSIX-named exports (`read`, `mmap`, `dup2`...)
   set errno via `KernelRuntimeCompatExports.TrySetErrno` and return `-1` in RAX on
   failure; `sceKernel*`-named exports return an `OrbisGen2Result` error code directly
@@ -120,15 +120,15 @@ game actually gets further. That's the next step.
   (like the pipe/poll/select bounded waits added this session) is a simplification,
   not the "correct" pattern — fine for short waits, wrong for anything a game expects
   to block on indefinitely.
-- Tests: `tests/SharpEmu.Libs.Tests/` uses xUnit with a `FakeCpuMemory`/custom
+- Tests: `tests/Hyper5.Libs.Tests/` uses xUnit with a `FakeCpuMemory`/custom
   `IGuestAddressSpace` fake (see `PosixKernelExportsTests.FakeGuestAddressSpaceMemory`)
   instead of a real ELF/guest process. No test in this repo currently loads and runs an
   actual game binary — that only happens via the CLI/GUI apps at runtime.
 - Build/test commands used this session (.NET 10 SDK, installed manually into
   `/root/.dotnet` since it wasn't preinstalled in the container):
   ```
-  dotnet build SharpEmu.slnx
-  dotnet test tests/SharpEmu.Libs.Tests/SharpEmu.Libs.Tests.csproj
+  dotnet build Hyper5.slnx
+  dotnet test tests/Hyper5.Libs.Tests/Hyper5.Libs.Tests.csproj
   python3 scripts/check_sysabi_aerolib.py
   ```
 

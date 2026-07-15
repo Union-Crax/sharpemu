@@ -1,0 +1,495 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Hyper5.GUI.MainWindow"
+        Title="Hyper5"
+        Width="1440" Height="900"
+        MinWidth="1080" MinHeight="650"
+        WindowState="Maximized"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BgBrush}"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome"
+        ExtendClientAreaTitleBarHeightHint="32"
+        Icon="avares://Hyper5.GUI/Assets/Hyper5.ico"
+        KeyDown="OnKeyDown">
+
+  <Window.Resources>
+    <ItemsPanelTemplate x:Key="GridItemsPanel"><WrapPanel /></ItemsPanelTemplate>
+    <ItemsPanelTemplate x:Key="ListItemsPanel"><VirtualizingStackPanel /></ItemsPanelTemplate>
+
+    <!-- Microsoft Fluent UI System Icons, Copyright (c) 2020 Microsoft
+         Corporation (MIT), original upstream geometries. -->
+    <StreamGeometry x:Key="FluentSubtract">M3 8C3 7.72386 3.22386 7.5 3.5 7.5H12.5C12.7761 7.5 13 7.72386 13 8C13 8.27614 12.7761 8.5 12.5 8.5H3.5C3.22386 8.5 3 8.27614 3 8Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentSquare">M2 4.5C2 3.11929 3.11929 2 4.5 2H11.5C12.8807 2 14 3.11929 14 4.5V11.5C14 12.8807 12.8807 14 11.5 14H4.5C3.11929 14 2 12.8807 2 11.5V4.5ZM4.5 3C3.67157 3 3 3.67157 3 4.5V11.5C3 12.3284 3.67157 13 4.5 13H11.5C12.3284 13 13 12.3284 13 11.5V4.5C13 3.67157 12.3284 3 11.5 3H4.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentSquareMultiple">M5.08496 4C5.29088 3.4174 5.8465 3 6.49961 3H9.99961C11.6565 3 12.9996 4.34315 12.9996 6V9.5C12.9996 10.1531 12.5822 10.7087 11.9996 10.9146V6C11.9996 4.89543 11.1042 4 9.99961 4H5.08496ZM4.5 5H9.5C10.3284 5 11 5.67157 11 6.5V11.5C11 12.3284 10.3284 13 9.5 13H4.5C3.67157 13 3 12.3284 3 11.5V6.5C3 5.67157 3.67157 5 4.5 5ZM4.5 6C4.22386 6 4 6.22386 4 6.5V11.5C4 11.7761 4.22386 12 4.5 12H9.5C9.77614 12 10 11.7761 10 11.5V6.5C10 6.22386 9.77614 6 9.5 6H4.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentDismiss">M2.58859 2.71569L2.64645 2.64645C2.82001 2.47288 3.08944 2.4536 3.28431 2.58859L3.35355 2.64645L8 7.293L12.6464 2.64645C12.8417 2.45118 13.1583 2.45118 13.3536 2.64645C13.5488 2.84171 13.5488 3.15829 13.3536 3.35355L8.707 8L13.3536 12.6464C13.5271 12.82 13.5464 13.0894 13.4114 13.2843L13.3536 13.3536C13.18 13.5271 12.9106 13.5464 12.7157 13.4114L12.6464 13.3536L8 8.707L3.35355 13.3536C3.15829 13.5488 2.84171 13.5488 2.64645 13.3536C2.45118 13.1583 2.45118 12.8417 2.64645 12.6464L7.293 8L2.64645 3.35355C2.47288 3.17999 2.4536 2.91056 2.58859 2.71569L2.64645 2.64645L2.58859 2.71569Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentGrid">M3.5 2C2.67157 2 2 2.67157 2 3.5V5.5C2 6.32843 2.67157 7 3.5 7H5.5C6.32843 7 7 6.32843 7 5.5V3.5C7 2.67157 6.32843 2 5.5 2H3.5ZM3 3.5C3 3.22386 3.22386 3 3.5 3H5.5C5.77614 3 6 3.22386 6 3.5V5.5C6 5.77614 5.77614 6 5.5 6H3.5C3.22386 6 3 5.77614 3 5.5V3.5ZM10.5 2C9.67157 2 9 2.67157 9 3.5V5.5C9 6.32843 9.67157 7 10.5 7H12.5C13.3284 7 14 6.32843 14 5.5V3.5C14 2.67157 13.3284 2 12.5 2H10.5ZM10 3.5C10 3.22386 10.2239 3 10.5 3H12.5C12.7761 3 13 3.22386 13 3.5V5.5C13 5.77614 12.7761 6 12.5 6H10.5C10.2239 6 10 5.77614 10 5.5V3.5ZM2 10.5C2 9.67157 2.67157 9 3.5 9H5.5C6.32843 9 7 9.67157 7 10.5V12.5C7 13.3284 6.32843 14 5.5 14H3.5C2.67157 14 2 13.3284 2 12.5V10.5ZM3.5 10C3.22386 10 3 10.2239 3 10.5V12.5C3 12.7761 3.22386 13 3.5 13H5.5C5.77614 13 6 12.7761 6 12.5V10.5C6 10.2239 5.77614 10 5.5 10H3.5ZM10.5 9C9.67157 9 9 9.67157 9 10.5V12.5C9 13.3284 9.67157 14 10.5 14H12.5C13.3284 14 14 13.3284 14 12.5V10.5C14 9.67157 13.3284 9 12.5 9H10.5ZM10 10.5C10 10.2239 10.2239 10 10.5 10H12.5C12.7761 10 13 10.2239 13 10.5V12.5C13 12.7761 12.7761 13 12.5 13H10.5C10.2239 13 10 12.7761 10 12.5V10.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentList">M2 3.5C2 3.22386 2.22386 3 2.5 3H10.5C10.7761 3 11 3.22386 11 3.5C11 3.77614 10.7761 4 10.5 4H2.5C2.22386 4 2 3.77614 2 3.5ZM2 11.5C2 11.2239 2.22386 11 2.5 11H9.5C9.77614 11 10 11.2239 10 11.5C10 11.7761 9.77614 12 9.5 12H2.5C2.22386 12 2 11.7761 2 11.5ZM2.5 7C2.22386 7 2 7.22386 2 7.5C2 7.77614 2.22386 8 2.5 8H13.5C13.7761 8 14 7.77614 14 7.5C14 7.22386 13.7761 7 13.5 7H2.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentFolderAdd">M2 4.5V6H5.58579C5.71839 6 5.84557 5.94732 5.93934 5.85355L7.29289 4.5L5.93934 3.14645C5.84557 3.05268 5.71839 3 5.58579 3H3.5C2.67157 3 2 3.67157 2 4.5ZM1 4.5C1 3.11929 2.11929 2 3.5 2H5.58579C5.98361 2 6.36514 2.15804 6.64645 2.43934L8.20711 4H12.5C13.8807 4 15 5.11929 15 6.5V7.25716C14.6929 7.00353 14.3578 6.78261 14 6.59971V6.5C14 5.67157 13.3284 5 12.5 5H8.20711L6.64645 6.56066C6.36514 6.84197 5.98361 7 5.58579 7H2V11.5C2 12.3284 2.67157 13 3.5 13H6.20703C6.30564 13.3486 6.43777 13.6832 6.59971 14H3.5C2.11929 14 1 12.8807 1 11.5V4.5ZM16 11.5C16 13.9853 13.9853 16 11.5 16C9.01472 16 7 13.9853 7 11.5C7 9.01472 9.01472 7 11.5 7C13.9853 7 16 9.01472 16 11.5ZM12 9.5C12 9.22386 11.7761 9 11.5 9C11.2239 9 11 9.22386 11 9.5V11H9.5C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12H11V13.5C11 13.7761 11.2239 14 11.5 14C11.7761 14 12 13.7761 12 13.5V12H13.5C13.7761 12 14 11.7761 14 11.5C14 11.2239 13.7761 11 13.5 11H12V9.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentArrowSync">M7.14645 0.646447C7.34171 0.451184 7.65829 0.451184 7.85355 0.646447L9.35355 2.14645C9.54882 2.34171 9.54882 2.65829 9.35355 2.85355L7.85355 4.35355C7.65829 4.54882 7.34171 4.54882 7.14645 4.35355C6.95118 4.15829 6.95118 3.84171 7.14645 3.64645L7.7885 3.00439C5.12517 3.11522 3 5.30943 3 8C3 9.56799 3.72118 10.9672 4.85185 11.8847C5.06627 12.0587 5.09904 12.3736 4.92503 12.588C4.75103 12.8024 4.43615 12.8352 4.22172 12.6612C2.86712 11.5619 2 9.88205 2 8C2 4.75447 4.57689 2.1108 7.79629 2.00339L7.14645 1.35355C6.95118 1.15829 6.95118 0.841709 7.14645 0.646447ZM11.075 3.41199C11.249 3.19756 11.5639 3.1648 11.7783 3.3388C13.1329 4.43806 14 6.11795 14 8C14 11.2455 11.4231 13.8892 8.20371 13.9966L8.85355 14.6464C9.04882 14.8417 9.04882 15.1583 8.85355 15.3536C8.65829 15.5488 8.34171 15.5488 8.14645 15.3536L6.64645 13.8536C6.55268 13.7598 6.5 13.6326 6.5 13.5C6.5 13.3674 6.55268 13.2402 6.64645 13.1464L8.14645 11.6464C8.34171 11.4512 8.65829 11.4512 8.85355 11.6464C9.04882 11.8417 9.04882 12.1583 8.85355 12.3536L8.2115 12.9956C10.8748 12.8848 13 10.6906 13 8C13 6.43201 12.2788 5.03283 11.1482 4.1153C10.9337 3.94129 10.901 3.62641 11.075 3.41199Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentDocument">M5 1C3.89543 1 3 1.89543 3 3V13C3 14.1046 3.89543 15 5 15H11C12.1046 15 13 14.1046 13 13V5.41421C13 5.01639 12.842 4.63486 12.5607 4.35355L9.64645 1.43934C9.36514 1.15804 8.98361 1 8.58579 1H5ZM4 3C4 2.44772 4.44772 2 5 2H8V4.5C8 5.32843 8.67157 6 9.5 6H12V13C12 13.5523 11.5523 14 11 14H5C4.44772 14 4 13.5523 4 13V3ZM11.7929 5H9.5C9.22386 5 9 4.77614 9 4.5V2.20711L11.7929 5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentLibrary">M1 3.24941C1 2.55938 1.55917 2 2.24895 2H2.74852C3.4383 2 3.99747 2.55938 3.99747 3.24941V12.745C3.99747 13.435 3.4383 13.9944 2.74852 13.9944H2.24895C1.55917 13.9944 1 13.435 1 12.745V3.24941ZM2.24895 2.99953C2.11099 2.99953 1.99916 3.11141 1.99916 3.24941V12.745C1.99916 12.883 2.11099 12.9948 2.24895 12.9948H2.74852C2.88648 12.9948 2.99831 12.883 2.99831 12.745V3.24941C2.99831 3.11141 2.88648 2.99953 2.74852 2.99953H2.24895ZM4.99663 3.24941C4.99663 2.55938 5.5558 2 6.24557 2H6.74515C7.43492 2 7.9941 2.55938 7.9941 3.24941V12.745C7.9941 13.435 7.43492 13.9944 6.74515 13.9944H6.24557C5.5558 13.9944 4.99663 13.435 4.99663 12.745V3.24941ZM6.24557 2.99953C6.10762 2.99953 5.99578 3.11141 5.99578 3.24941V12.745C5.99578 12.883 6.10762 12.9948 6.24557 12.9948H6.74515C6.88311 12.9948 6.99494 12.883 6.99494 12.745V3.24941C6.99494 3.11141 6.88311 2.99953 6.74515 2.99953H6.24557ZM11.9723 4.77682C11.7231 4.15733 11.0311 3.84331 10.4011 4.06385L9.81888 4.26764C9.14658 4.50297 8.80684 5.25222 9.07268 5.91326L12.0098 13.2166C12.2589 13.8361 12.9509 14.1502 13.581 13.9296L14.1632 13.7258C14.8355 13.4904 15.1752 12.7412 14.9093 12.0802L11.9723 4.77682ZM10.7311 5.00729C10.8571 4.96318 10.9955 5.02598 11.0453 5.14988L13.9824 12.4532C14.0356 12.5854 13.9676 12.7353 13.8332 12.7823L13.251 12.9862C13.1249 13.0303 12.9865 12.9675 12.9367 12.8436L9.99964 5.5402C9.94647 5.40799 10.0144 5.25815 10.1489 5.21108L10.7311 5.00729Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentInfo">M8.49902 7.49998C8.49902 7.22384 8.27517 6.99998 7.99902 6.99998C7.72288 6.99998 7.49902 7.22384 7.49902 7.49998V10.5C7.49902 10.7761 7.72288 11 7.99902 11C8.27517 11 8.49902 10.7761 8.49902 10.5V7.49998ZM8.74807 5.50001C8.74807 5.91369 8.41271 6.24905 7.99903 6.24905C7.58535 6.24905 7.25 5.91369 7.25 5.50001C7.25 5.08633 7.58535 4.75098 7.99903 4.75098C8.41271 4.75098 8.74807 5.08633 8.74807 5.50001ZM8 1C4.13401 1 1 4.13401 1 8C1 11.866 4.13401 15 8 15C11.866 15 15 11.866 15 8C15 4.13401 11.866 1 8 1ZM2 8C2 4.68629 4.68629 2 8 2C11.3137 2 14 4.68629 14 8C14 11.3137 11.3137 14 8 14C4.68629 14 2 11.3137 2 8Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentPlay">M5.74514 3.06445C5.41183 2.87696 5 3.11781 5 3.50023V12.5005C5 12.8829 5.41182 13.1238 5.74512 12.9363L13.7454 8.43631C14.0852 8.24517 14.0852 7.75589 13.7454 7.56474L5.74514 3.06445ZM4 3.50023C4 2.35298 5.2355 1.63041 6.23541 2.19288L14.2357 6.69317C15.2551 7.26664 15.2551 8.73446 14.2356 9.3079L6.23537 13.8079C5.23546 14.3703 4 13.6477 4 12.5005V3.50023Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentStop">M12.5 3C12.7761 3 13 3.22386 13 3.5V12.5C13 12.7761 12.7761 13 12.5 13H3.5C3.22386 13 3 12.7761 3 12.5V3.5C3 3.22386 3.22386 3 3.5 3H12.5ZM3.5 2C2.67157 2 2 2.67157 2 3.5V12.5C2 13.3284 2.67157 14 3.5 14H12.5C13.3284 14 14 13.3284 14 12.5V3.5C14 2.67157 13.3284 2 12.5 2H3.5Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentWrench">M6.99952 5C6.99952 2.79086 8.79038 1 10.9995 1C11.5083 1 11.996 1.09524 12.445 1.26931C12.6026 1.3304 12.7187 1.46698 12.7535 1.63235C12.7884 1.79773 12.7374 1.96953 12.6178 2.08904L10.7068 4.00012L11.9997 5.29302L13.9106 3.38207C14.0301 3.26254 14.2019 3.2115 14.3673 3.24637C14.5327 3.28125 14.6693 3.39732 14.7304 3.55493C14.9043 4.0038 14.9995 4.49138 14.9995 5C14.9995 7.20914 13.2087 9 10.9995 9C10.6194 9 10.251 8.94684 9.90178 8.84736L4.8953 13.9192C4.18135 14.6425 3.03655 14.7101 2.24252 14.0757C1.3284 13.3455 1.24051 11.9872 2.05291 11.1453L7.10375 5.91061C7.03552 5.61771 6.99952 5.31279 6.99952 5ZM10.9995 2C9.34267 2 7.99952 3.34315 7.99952 5C7.99952 5.31548 8.04805 5.61868 8.13768 5.90305C8.19276 6.07781 8.14785 6.26869 8.02062 6.40054L2.77254 11.8396C2.36923 12.2576 2.41286 12.9319 2.86667 13.2944C3.26086 13.6093 3.82918 13.5758 4.18361 13.2167L9.40781 7.9243C9.54665 7.78364 9.75532 7.73797 9.94023 7.80777C10.269 7.93186 10.6257 8 10.9995 8C12.6564 8 13.9995 6.65685 13.9995 5C13.9995 4.9056 13.9952 4.81228 13.9867 4.72023L12.3533 6.35368C12.2595 6.44745 12.1324 6.50013 11.9997 6.50013C11.8671 6.50013 11.74 6.44745 11.6462 6.35368L9.64619 4.35368C9.45093 4.15842 9.45092 3.84185 9.64618 3.64658L11.2798 2.01289C11.1876 2.00436 11.0941 2 10.9995 2Z</StreamGeometry>
+    <StreamGeometry x:Key="FluentConsole">M5.64645 9.14645C5.84171 8.95118 6.15829 8.95118 6.35355 9.14645L8.35355 11.1464C8.44732 11.2402 8.5 11.3674 8.5 11.5C8.5 11.6326 8.44732 11.7598 8.35355 11.8536L6.35355 13.8536C6.15829 14.0488 5.84171 14.0488 5.64645 13.8536C5.45118 13.6583 5.45118 13.3417 5.64645 13.1464L7.29289 11.5L5.64645 9.85355C5.45118 9.65829 5.45118 9.34171 5.64645 9.14645ZM14.5 13H9.5C9.22386 13 9 13.2239 9 13.5C9 13.7761 9.22386 14 9.5 14H14.5C14.7761 14 15 13.7761 15 13.5C15 13.2239 14.7761 13 14.5 13ZM2.99609 5.5C2.99609 4.11929 4.11538 3 5.49609 3H14.4961C15.8768 3 16.9961 4.11929 16.9961 5.5V6H16.999V7H16.9961V14.5C16.9961 15.8807 15.8768 17 14.4961 17H5.49609C4.11538 17 2.99609 15.8807 2.99609 14.5V5.5ZM15.9961 6V5.5C15.9961 4.67157 15.3245 4 14.4961 4H5.49609C4.66767 4 3.99609 4.67157 3.99609 5.5V6H15.9961ZM3.99609 7V14.5C3.99609 15.3284 4.66767 16 5.49609 16H14.4961C15.3245 16 15.9961 15.3284 15.9961 14.5V7H3.99609Z</StreamGeometry>
+
+    <!-- Kenney Input Prompts by Kenney (CC0 1.0), original 64 px glyphs. -->
+    <StreamGeometry x:Key="PromptPlayStationCross">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M22.8 20L20 22.8 29.2 32 20 41.2 22.8 44 32 34.8 41.2 44 44 41.2 34.8 32 44 22.8 41.2 20 32 29.2 22.8 20</StreamGeometry>
+    <StreamGeometry x:Key="PromptPlayStationCircle">M37.7 26.35Q40 28.65 40 32 40 35.35 37.7 37.7 35.35 40 32 40 28.7 40 26.4 37.7L26.35 37.65Q24 35.3 24 32 24 28.7 26.35 26.35L26.4 26.35Q28.7 24 32 24 35.35 24 37.7 26.35M44 32Q44 27 40.5 23.5 37 20 32 20 27.05 20 23.55 23.5 20 27 20 32 20 37 23.55 40.5 27.05 44 32 44 37 44 40.5 40.5 44 37 44 32M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32</StreamGeometry>
+    <StreamGeometry x:Key="PromptPlayStationSquare">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M24 40L24 24 40 24 40 40 24 40M20 20L20 44 44 44 44 20 20 20</StreamGeometry>
+    <StreamGeometry x:Key="PromptPlayStationTriangle">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M32 25.95L39.05 38 25 38 32 25.95M46 42L32 18 18 42 46 42</StreamGeometry>
+    <StreamGeometry x:Key="PromptXboxA">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M38 42L42 42 34 22 30 22 22 42 26 42 27.6 38 36.4 38 38 42M32 27L34.8 34 29.2 34 32 27</StreamGeometry>
+    <StreamGeometry x:Key="PromptXboxB">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M37 28Q37 28.85 36.45 29.4L36.4 29.4Q35.8 30 35 30L29 30 29 26 35 26Q35.8 26 36.35 26.55L36.45 26.65Q37 27.2 37 28M41 36Q41 33.7 39.5 32 41 30.3 41 28 41 25.55 39.25 23.8L39.2 23.75Q37.45 22 35 22L25 22 25 42 35 42Q37.45 42 39.2 40.25L39.25 40.2Q41 38.45 41 36M37 36Q37 36.8 36.45 37.35L36.35 37.45Q35.8 38 35 38L29 38 29 34 35 34Q35.8 34 36.4 34.6L36.45 34.6Q37 35.15 37 36</StreamGeometry>
+    <StreamGeometry x:Key="PromptXboxX">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M23 25L29 32 23 39 23 40 25.25 42 26.4 42 32 35.5 37.65 42 38.75 42 41 40 41 39 35 32 41 25 41 24 38.75 22 37.65 22 32 28.55 26.4 22 25.25 22 23 24 23 25</StreamGeometry>
+    <StreamGeometry x:Key="PromptXboxY">M56 32Q56 42 48.95 48.95 42 56 32 56 22.05 56 15 48.95 8 42 8 32 8 22.05 15 15 22.05 8 32 8 42 8 48.95 15 56 22.05 56 32M23 25L30 32.9 30 42 34 42 34 32.9 41 25 41 24 38.75 22 37.65 22 32 28.55 26.4 22 25.25 22 23 24 23 25</StreamGeometry>
+
+    <DataTemplate x:Key="GridGameTemplate">
+      <StackPanel Width="148" Spacing="6">
+        <Border Classes="coverShadow" Width="148" Height="148">
+          <Border Classes="coverClip">
+            <Panel>
+              <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                <TextBlock Text="{Binding Initials}" FontSize="32" FontWeight="Bold"
+                           Foreground="#EEF2F8" Opacity="0.88"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
+            </Panel>
+          </Border>
+        </Border>
+        <StackPanel Spacing="2">
+          <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                     TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding TitleId}" FontSize="10" Foreground="{StaticResource FaintBrush}"
+                     IsVisible="{Binding HasTitleId}" />
+          <TextBlock Text="{Binding SizeText}" FontSize="10" Foreground="{StaticResource FaintBrush}" />
+        </StackPanel>
+      </StackPanel>
+    </DataTemplate>
+
+    <DataTemplate x:Key="ListGameTemplate">
+      <Grid Height="68" Margin="8,0" ColumnDefinitions="Auto,*,Auto,Auto">
+        <Border Classes="coverClip" Width="52" Height="52" VerticalAlignment="Center">
+          <Panel>
+            <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+              <TextBlock Text="{Binding Initials}" FontSize="16" FontWeight="Bold"
+                         Foreground="#EEF2F8" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
+          </Panel>
+        </Border>
+        <StackPanel Grid.Column="1" Margin="12,0,16,0" VerticalAlignment="Center" Spacing="3">
+          <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                     TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding Path}" FontSize="10" Foreground="{StaticResource FaintBrush}"
+                     TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+        <TextBlock Grid.Column="2" Text="{Binding TitleId}" FontSize="10"
+                   Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"
+                   Margin="0,0,22,0" IsVisible="{Binding HasTitleId}" />
+        <TextBlock Grid.Column="3" Text="{Binding SizeText}" FontSize="10"
+                   Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"
+                   Margin="0,0,8,0" />
+      </Grid>
+    </DataTemplate>
+  </Window.Resources>
+
+  <!-- Windows positions its resize frame just outside the work area while a
+       window is maximized. Respect that platform-provided inset so content at
+       every edge remains visible. -->
+  <Grid x:Name="RootLayout" RowDefinitions="32,42,*,26"
+        Margin="{Binding OffScreenMargin, RelativeSource={RelativeSource AncestorType=Window}}">
+    <!-- Custom chrome keeps the controls consistent with the rest of Hyper5
+         while Avalonia continues to provide the native resize frame. -->
+    <Border x:Name="TitleBar" Grid.Row="0" Height="32" Background="{StaticResource ChromeBrush}"
+            BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" Margin="10,0">
+          <Image Source="avares://Hyper5.GUI/Assets/Hyper5.ico" Width="18" Height="18"
+                  RenderOptions.BitmapInterpolationMode="HighQuality" />
+          <TextBlock Text="Hyper5" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="10"
+                     Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button x:Name="MinimizeButton" Classes="captionButton" ToolTip.Tip="Minimize">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentSubtract}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+          <Button x:Name="MaximizeRestoreButton" Classes="captionButton" ToolTip.Tip="Maximize">
+            <Path x:Name="MaximizeRestoreGlyph" Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentSquare}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+          <Button x:Name="CloseButton" Classes="captionButton close" ToolTip.Tip="Close">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentDismiss}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Command bar intentionally spans the workspace so controls never
+         compete with a visible inspector pane. -->
+    <Border Grid.Row="1" Background="{StaticResource ChromeBrush}">
+      <Grid ColumnDefinitions="56,Auto,18,*" Margin="10,0">
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0,18,0">
+          <TextBlock x:Name="PageEyebrow" Text="LIBRARY" IsVisible="False" />
+          <TextBlock x:Name="PageTitle" Text="Library" Classes="pageTitle" />
+          <TextBlock x:Name="PageSubtitle" Text="" IsVisible="False" />
+        </StackPanel>
+        <StackPanel Grid.Column="3" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="5"
+                    HorizontalAlignment="Left" VerticalAlignment="Center">
+          <TextBox x:Name="SearchBox" Watermark="Search library" Width="220" />
+          <ComboBox x:Name="SortBox" Width="114" SelectedIndex="0">
+            <ComboBoxItem Content="Name" />
+            <ComboBoxItem Content="Title ID" />
+            <ComboBoxItem Content="Install size" />
+          </ComboBox>
+          <ToggleButton x:Name="GridViewButton" Classes="iconButton" IsChecked="True" ToolTip.Tip="Cover view">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentGrid}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" />
+          </ToggleButton>
+          <ToggleButton x:Name="ListViewButton" Classes="iconButton" ToolTip.Tip="List view">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentList}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" />
+          </ToggleButton>
+          <Button x:Name="AddFolderButton" Classes="accent" ToolTip.Tip="Add folder">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentFolderAdd}" Fill="White" />
+              <TextBlock x:Name="AddFolderButtonLabel" Text="Add games" />
+            </StackPanel>
+          </Button>
+          <Button x:Name="RescanButton" Classes="iconButton" ToolTip.Tip="Rescan library">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentArrowSync}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+          <Button x:Name="OpenFileButton" Classes="iconButton" ToolTip.Tip="Open file">
+            <Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentDocument}"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+          <ToggleButton x:Name="ConsoleToggle" Classes="ghost" ToolTip.Tip="Console"
+                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Grid x:Name="ConsoleControllerGlyph" Width="20" Height="20">
+                <Path x:Name="ConsolePlayStationGlyph" Stretch="Uniform" Data="{StaticResource PromptPlayStationSquare}" Fill="#F5F7FC" />
+                <Path x:Name="ConsoleXboxGlyph" Stretch="Uniform" Data="{StaticResource PromptXboxX}" Fill="#F5F7FC" IsVisible="False" />
+              </Grid>
+              <Path x:Name="ConsoleStandardGlyph" Width="18" Height="18" Stretch="Uniform"
+                    Data="{StaticResource FluentConsole}" Fill="{StaticResource MutedBrush}" IsVisible="False" />
+              <TextBlock x:Name="ConsoleToggleLabel" Text="Console" VerticalAlignment="Center" />
+            </StackPanel>
+          </ToggleButton>
+          <ToggleButton x:Name="InspectorToggleButton" Classes="iconButton" ToolTip.Tip="Game details">
+            <Grid>
+              <Grid x:Name="InspectorControllerGlyph" Width="20" Height="20">
+                <Path x:Name="InspectorPlayStationGlyph" Stretch="Uniform" Data="{StaticResource PromptPlayStationTriangle}" Fill="#F5F7FC" />
+                <Path x:Name="InspectorXboxGlyph" Stretch="Uniform" Data="{StaticResource PromptXboxY}" Fill="#F5F7FC" IsVisible="False" />
+              </Grid>
+              <Grid x:Name="InspectorStandardGlyph" Width="16" Height="16" IsVisible="False"
+                    HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Path Width="16" Height="16" Stretch="Uniform" Fill="{StaticResource MutedBrush}"
+                      Data="{StaticResource FluentInfo}" />
+              </Grid>
+            </Grid>
+          </ToggleButton>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Grid x:Name="WorkspaceGrid" Grid.Row="2" ColumnDefinitions="56,*,0,0" RowDefinitions="*,6,180"
+          ClipToBounds="True">
+      <!-- Keep the backdrop inside the library viewport so it reflows with
+           neighboring inspector width and console height changes. -->
+      <Grid Grid.Row="0" Grid.Column="1" Panel.ZIndex="0"
+            ClipToBounds="True">
+        <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
+               HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+               IsVisible="False" IsHitTestVisible="False" />
+        <Border x:Name="BackdropScrim" Background="#151612" Opacity="0.72"
+                IsVisible="False" IsHitTestVisible="False"
+                HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
+      </Grid>
+
+      <!-- Compact icon rail. The system tooltip is the label; the selected
+           state is deliberately subtle and consistent. -->
+      <Border Grid.Row="0" Grid.Column="0" Background="{StaticResource SidebarBrush}"
+              BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="0,0,1,0">
+        <Grid>
+          <StackPanel VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,10,0,0">
+            <Button x:Name="LibraryTabButton" Classes="segment active" ToolTip.Tip="Library"
+                    ><Path Width="17" Height="17" Stretch="Uniform" Data="{StaticResource FluentLibrary}"
+                           Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" /></Button>
+            <Button x:Name="OptionsTabButton" Classes="segment" ToolTip.Tip="Options">
+              <Path Width="17" Height="17" Stretch="Uniform" Data="{StaticResource FluentWrench}"
+                    Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+            </Button>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- Primary workspace. The library owns the available center area; the
+           inspector and console are independent docks. -->
+      <Grid Grid.Row="0" Grid.Column="1" Margin="18,12,12,0" RowDefinitions="*">
+        <Grid Grid.Row="0">
+          <Grid x:Name="LibraryPage">
+            <Grid RowDefinitions="Auto,*">
+              <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,18,9">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                  <TextBlock Text="Installed titles" FontSize="12" Foreground="{StaticResource MutedBrush}" />
+                  <Border Classes="pill"><TextBlock x:Name="LibraryCountText" Text="0" FontSize="10" Foreground="{StaticResource MutedBrush}" /></Border>
+                </StackPanel>
+              </Grid>
+
+              <Grid Grid.Row="1">
+                <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
+                         SelectionMode="Single" Padding="0"
+                         ItemsPanel="{StaticResource GridItemsPanel}"
+                         ItemTemplate="{StaticResource GridGameTemplate}">
+                  <ListBox.ContextMenu>
+                    <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
+                      <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold" />
+                      <MenuItem x:Name="CtxOpenFolder" Header="Open game folder" />
+                      <Separator />
+                      <MenuItem x:Name="CtxCopyPath" Header="Copy path" />
+                      <MenuItem x:Name="CtxCopyTitleId" Header="Copy title ID" />
+                      <Separator />
+                      <MenuItem x:Name="CtxRemove" Header="Remove from library" Foreground="{StaticResource DangerHoverBrush}" />
+                    </ContextMenu>
+                  </ListBox.ContextMenu>
+                </ListBox>
+
+                <StackPanel x:Name="EmptyState" Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsVisible="False">
+                  <TextBlock Text="No games in this library" FontSize="16" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" />
+                  <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="12"
+                             Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
+                  <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
+                             FontSize="11" Foreground="{StaticResource FaintBrush}" HorizontalAlignment="Center" />
+                  <Button x:Name="EmptyAddFolderButton" Classes="accent" Content="Add game folder"
+                          HorizontalAlignment="Center" Margin="0,5,0,0" />
+                </StackPanel>
+
+                <StackPanel x:Name="LoadingState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsVisible="False">
+                  <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
+                  <TextBlock x:Name="LoadingStateText" Text="Loading library…" FontSize="11"
+                             Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
+                </StackPanel>
+              </Grid>
+            </Grid>
+          </Grid>
+
+          <Grid x:Name="OptionsPage" IsVisible="False" Margin="0,0,18,0">
+            <TabControl x:Name="OptionsTabControl">
+              <TabItem x:Name="GeneralTabItem" Header="General">
+                <ScrollViewer>
+                  <StackPanel Margin="0,10,0,16" Spacing="18" MaxWidth="840" HorizontalAlignment="Left">
+                    <Border Classes="card">
+                      <StackPanel Spacing="12">
+                        <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle" Text="EMULATION" />
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="CpuEngineLabel" Text="CPU engine" FontSize="12" /><TextBlock x:Name="CpuEngineDesc" Text="Execution engine used to run game code." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ComboBox Grid.Column="1" x:Name="CpuEngineBox" Width="145" SelectedIndex="0"><ComboBoxItem x:Name="CpuEngineNativeItem" Content="Native" /></ComboBox></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="StrictLabel" Text="Strict dynlib resolution" FontSize="12" /><TextBlock x:Name="StrictDesc" Text="Fail the launch when an imported symbol cannot be resolved." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="StrictToggle" OnContent="On" OffContent="Off" /></Grid>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="card">
+                      <StackPanel Spacing="12">
+                        <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle" Text="LOGGING" />
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="LogLevelLabel" Text="Log level" FontSize="12" /><TextBlock x:Name="LogLevelDesc" Text="Verbosity of the emulator console output." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ComboBox Grid.Column="1" x:Name="LogLevelBox" Width="145" SelectedIndex="2"><ComboBoxItem x:Name="LogLevelTraceItem" Content="Trace" /><ComboBoxItem x:Name="LogLevelDebugItem" Content="Debug" /><ComboBoxItem x:Name="LogLevelInfoItem" Content="Info" /><ComboBoxItem x:Name="LogLevelWarningItem" Content="Warning" /><ComboBoxItem x:Name="LogLevelErrorItem" Content="Error" /><ComboBoxItem x:Name="LogLevelCriticalItem" Content="Critical" /></ComboBox></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="TraceImportsLabel" Text="Import trace limit" FontSize="12" /><TextBlock x:Name="TraceImportsDesc" Text="Trace the first N imports per module (0 = off)." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><NumericUpDown Grid.Column="1" x:Name="TraceImportsBox" Width="145" Minimum="0" Maximum="4096" Increment="16" Value="0" FormatString="0" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="LogToFileLabel" Text="Log to file" FontSize="12" /><TextBlock x:Name="LogToFileDesc" Text="Mirror emulator output to a log file." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="LogToFileToggle" OnContent="On" OffContent="Off" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="LogFilePathLabel" Text="Log file path" FontSize="12" /><TextBlock x:Name="LogFilePathText" Text="No custom path" FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><Button Grid.Column="1" x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="OverrideLogFileLabel" Text="Override log file" FontSize="12" /><TextBlock x:Name="OverrideLogFileDesc" Text="Use the exact file path instead of appending title ID and timestamp." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off" /></Grid>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="card">
+                      <StackPanel Spacing="12">
+                        <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle" Text="LAUNCHER" />
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="LanguageLabel" Text="Emulator language" FontSize="12" /><TextBlock x:Name="LanguageDesc" Text="Language used throughout the launcher. Applies immediately." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ComboBox Grid.Column="1" x:Name="LanguageBox" Width="145" DisplayMemberBinding="{Binding NativeName}" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="ControllerButtonsLabel" Text="Controller button icons" FontSize="12" /><TextBlock x:Name="ControllerButtonsDesc" Text="Match action icons to the connected controller." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="ControllerButtonsToggle" OnContent="On" OffContent="Off" IsChecked="True" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="TitleMusicLabel" Text="Title music" FontSize="12" /><TextBlock x:Name="TitleMusicDesc" Text="Loop the selected game's preview music in the library." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="TitleMusicToggle" OnContent="On" OffContent="Off" IsChecked="True" /></Grid>
+                        <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock x:Name="DiscordLabel" Text="Discord presence" FontSize="12" /><TextBlock x:Name="DiscordDesc" Text="Show the running game on your Discord profile." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="DiscordToggle" OnContent="On" OffContent="Off" /></Grid>
+                      </StackPanel>
+                    </Border>
+                    <Border Classes="card">
+                      <StackPanel Spacing="12">
+                        <TextBlock x:Name="AboutSectionTitle" Classes="sectionTitle" Text="ABOUT" />
+                         <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2"><TextBlock x:Name="GithubLabel" Text="GitHub" FontSize="12" /><TextBlock x:Name="GithubDesc" Text="Source code, issues and project development." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><Button x:Name="GithubButton" Grid.Column="1" Classes="ghost" Content="Open GitHub" /></Grid>
+                         <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2"><TextBlock x:Name="DiscordServerLabel" Text="Discord" FontSize="12" /><TextBlock x:Name="DiscordServerDesc" Text="Join the community, get support and follow development." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><Button x:Name="DiscordButton" Grid.Column="1" Classes="ghost" Content="Join Discord" /></Grid>
+                         <Border Background="{StaticResource PanelRaisedBrush}" BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="1" CornerRadius="5" Padding="12,10">
+                           <Grid ColumnDefinitions="*,Auto">
+                             <StackPanel Spacing="3" Margin="0,0,16,0">
+                               <TextBlock Text="Open-source credits" FontSize="12" FontWeight="SemiBold" />
+                               <TextBlock Text="Hyper5 is based on the original Hyper5 project. Credits to Hyper5 and its contributors."
+                                          FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                             </StackPanel>
+                             <Button x:Name="OriginalRepoButton" Grid.Column="1" Classes="ghost" Content="View Hyper5" VerticalAlignment="Center" />
+                           </Grid>
+                         </Border>
+                      </StackPanel>
+                    </Border>
+                  </StackPanel>
+                </ScrollViewer>
+              </TabItem>
+              <TabItem x:Name="EnvTabItem" Header="Environment">
+                <ScrollViewer>
+                  <StackPanel Margin="0,10,0,16" Spacing="18" MaxWidth="840" HorizontalAlignment="Left">
+                    <Border Classes="card"><StackPanel Spacing="12">
+                      <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle" Text="ENVIRONMENT VARIABLES" />
+                      <TextBlock x:Name="EnvDesc" Text="Switches passed to the emulator as environment variables at launch." FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_BTHID_UNAVAILABLE" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvBthidDesc" Text="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvBthidToggle" OnContent="On" OffContent="Off" /></Grid>
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_DISABLE_IMPORT_LOOP_GUARD" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvLoopGuardDesc" Text="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off" /></Grid>
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_VK_VALIDATION" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvVkValidationDesc" Text="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off" /></Grid>
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_DUMP_SPIRV" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvDumpSpirvDesc" Text="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off" /></Grid>
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_LOG_DIRECT_MEMORY" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvLogDirectMemoryDesc" Text="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off" /></Grid>
+                      <Grid ColumnDefinitions="*,Auto"><StackPanel Spacing="2" Margin="0,0,18,0"><TextBlock Text="HYPER5_LOG_NP" FontSize="12" FontFamily="Consolas,monospace" /><TextBlock x:Name="EnvLogNpDesc" Text="Log NP (PlayStation Network) library calls to the console." FontSize="11" Foreground="{StaticResource MutedBrush}" /></StackPanel><ToggleSwitch Grid.Column="1" x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off" /></Grid>
+                    </StackPanel></Border>
+                  </StackPanel>
+                </ScrollViewer>
+              </TabItem>
+            </TabControl>
+          </Grid>
+        </Grid>
+
+      </Grid>
+
+      <GridSplitter x:Name="ConsoleSplitter" Classes="dockSplitter" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
+                    ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+                    Cursor="SizeNorthSouth"
+                    Background="{StaticResource CardBorderBrush}" IsVisible="False" />
+      <Border Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" x:Name="ConsolePanel"
+              Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource CardBorderBrush}"
+              BorderThickness="0,1,0,0" IsVisible="False">
+        <Grid RowDefinitions="32,*">
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto" Margin="12,0">
+            <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
+            <TextBox Grid.Column="1" FontSize="11" Margin="14,0" x:Name="ConsoleSearchBox" Watermark="Filter output" MaxWidth="260" HorizontalAlignment="Left" Width="220" />
+            <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True" FontSize="11" Margin="0,0,10,0" />
+            <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost" Content="Split" FontSize="11" Padding="8,4" Margin="0,0,5,0" />
+            <Button Grid.Column="4" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="11" Padding="8,4" Margin="0,0,5,0" />
+            <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost" Content="Clear" FontSize="11" Padding="8,4" />
+          </Grid>
+          <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
+                   BorderBrush="{StaticResource CardBorderBrush}">
+            <ListBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" /></DataTemplate></ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+
+      <GridSplitter x:Name="InspectorSplitter" Classes="dockSplitter" Grid.Row="0" Grid.Column="2" Width="4"
+                    ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"
+                    Cursor="SizeWestEast"
+                    Background="{StaticResource CardBorderBrush}" IsVisible="False" />
+      <!-- Contextual, user-dismissible game inspector. -->
+      <Border Grid.Row="0" Grid.Column="3" x:Name="SelectedGamePanel" Classes="inspector"
+              HorizontalAlignment="Stretch" Padding="0" IsVisible="False">
+        <Grid RowDefinitions="*,Auto">
+          <!-- Details scroll independently at compact heights. The launch
+               actions remain available in their own footer instead of
+               overflowing into the console dock. -->
+          <ScrollViewer Grid.Row="0" Padding="16,14,16,8"
+                        MinHeight="0"
+                        VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <Grid RowDefinitions="Auto,Auto,Auto,Auto">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="SELECTED GAME" Classes="sectionTitle" VerticalAlignment="Center" />
+            <Button Grid.Column="1" x:Name="InspectorCloseButton" Classes="iconButton" ToolTip.Tip="Close details"
+                    ><Path Width="16" Height="16" Stretch="Uniform" Data="{StaticResource FluentDismiss}"
+                           Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" /></Button>
+          </Grid>
+          <Border Grid.Row="1" Classes="coverShadow" Width="176" Height="176" Margin="0,14,0,15"
+                  HorizontalAlignment="Left">
+            <Border Classes="coverClip">
+              <Panel x:Name="SelectedCoverPanel">
+                <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}" IsVisible="{Binding !HasCover, FallbackValue=False}">
+                  <TextBlock Text="{Binding Initials}" FontSize="42" FontWeight="Bold" Foreground="#EEF2F8"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover, FallbackValue=False}" />
+              </Panel>
+            </Border>
+          </Border>
+          <StackPanel Grid.Row="2" Spacing="6">
+            <TextBlock x:Name="SelectedGameTitle" Text="No game selected" FontSize="18" FontWeight="SemiBold"
+                       TextWrapping="Wrap" MaxLines="2" />
+            <StackPanel x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="5" IsVisible="False">
+              <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}"><TextBlock Text="{Binding TitleId}" FontSize="10" Foreground="{StaticResource MutedBrush}" /></Border>
+              <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}"><TextBlock Text="{Binding VersionText}" FontSize="10" Foreground="{StaticResource MutedBrush}" /></Border>
+            </StackPanel>
+            <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
+                       FontSize="10" Foreground="{StaticResource FaintBrush}" TextWrapping="NoWrap"
+                       TextTrimming="CharacterEllipsis" />
+          </StackPanel>
+          <Grid Grid.Row="3" Margin="0,18,0,0" RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="Auto,*">
+            <TextBlock Grid.Row="0" Classes="fieldLabel" Text="Status" />
+            <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Spacing="6">
+              <Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="{StaticResource FaintBrush}" VerticalAlignment="Center" />
+              <TextBlock x:Name="StatusText" Text="Idle" FontSize="11" Foreground="{StaticResource MutedBrush}"
+                         TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+            <TextBlock Grid.Row="1" Classes="fieldLabel" Text="Install size" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding DataContext.SizeText, ElementName=SelectedCoverPanel}"
+                       FontSize="11" Foreground="{StaticResource MutedBrush}" />
+            <TextBlock Grid.Row="2" Classes="fieldLabel" Text="Version" />
+            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DataContext.VersionText, ElementName=SelectedCoverPanel}"
+                       FontSize="11" Foreground="{StaticResource MutedBrush}" />
+            <TextBlock Grid.Row="3" Classes="fieldLabel" Text="Title ID" />
+            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding DataContext.TitleId, ElementName=SelectedCoverPanel}"
+                       FontSize="11" Foreground="{StaticResource MutedBrush}" />
+          </Grid>
+            </Grid>
+          </ScrollViewer>
+          <Border Grid.Row="1" Background="{StaticResource PanelBrush}" Padding="16,0,16,14">
+            <StackPanel Spacing="6">
+              <Button x:Name="OpenGameFolderButton" Classes="ghost" Content="Open game folder" HorizontalAlignment="Stretch" />
+              <Button x:Name="LaunchButton" Classes="accent" IsEnabled="False" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
+                <Grid ColumnDefinitions="*,20,7,Auto,*">
+                  <Grid x:Name="LaunchControllerGlyph" Grid.Column="1" Width="20" Height="20">
+                    <Path x:Name="LaunchPlayStationGlyph" Stretch="Uniform" Data="{StaticResource PromptPlayStationCross}" Fill="#F5F7FC" />
+                    <Path x:Name="LaunchXboxGlyph" Stretch="Uniform" Data="{StaticResource PromptXboxA}" Fill="#F5F7FC" IsVisible="False" />
+                  </Grid>
+                  <Path x:Name="LaunchStandardGlyph" Grid.Column="1" Width="16" Height="16" Stretch="Uniform"
+                        Data="{StaticResource FluentPlay}" Fill="#F5F7FC"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" />
+                  <TextBlock x:Name="LaunchButtonLabel" Grid.Column="3" Text="Launch" VerticalAlignment="Center" />
+                </Grid>
+              </Button>
+              <Button x:Name="StopButton" Classes="danger" IsEnabled="False" HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
+                <Grid ColumnDefinitions="*,20,7,Auto,*">
+                  <Grid x:Name="StopControllerGlyph" Grid.Column="1" Width="20" Height="20">
+                    <Path x:Name="StopPlayStationGlyph" Stretch="Uniform" Data="{StaticResource PromptPlayStationCircle}" Fill="#F5F7FC" />
+                    <Path x:Name="StopXboxGlyph" Stretch="Uniform" Data="{StaticResource PromptXboxB}" Fill="#F5F7FC" IsVisible="False" />
+                  </Grid>
+                  <Path x:Name="StopStandardGlyph" Grid.Column="1" Width="16" Height="16" Stretch="Uniform"
+                        Data="{StaticResource FluentStop}" Fill="#F5F7FC"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" />
+                  <TextBlock x:Name="StopButtonLabel" Grid.Column="3" Text="Stop" VerticalAlignment="Center" />
+                </Grid>
+              </Button>
+            </StackPanel>
+          </Border>
+        </Grid>
+      </Border>
+    </Grid>
+
+    <!-- IDE-style status bar: useful runtime state, minimal height. -->
+    <Grid x:Name="StatusBar" Grid.Row="3" Height="26" Background="{StaticResource ChromeBrush}"
+          ColumnDefinitions="*,Auto">
+      <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="10"
+                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="10,0"
+                 TextTrimming="CharacterEllipsis" />
+      <TextBlock x:Name="StatusBarRight" Grid.Column="1" Text="" FontSize="10"
+                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="10,0" />
+    </Grid>
+  </Grid>
+</Window>

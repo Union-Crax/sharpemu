@@ -41,7 +41,7 @@ The quality, correctness, maintainability, and long-term ownership of the submit
 
 ## Coding Style
 
-SharpEmu follows a consistent coding style across the project. Please ensure your contributions match the existing style.
+Hyper5 follows a consistent coding style across the project. Please ensure your contributions match the existing style.
 
 - Use **4 spaces** for indentation (no tabs).
 - Use **2 spaces** for XML-based files (e.g. `.csproj`, `.props`, `.targets`, `.xml`, `yml`, GitHub workflow files where applicable).

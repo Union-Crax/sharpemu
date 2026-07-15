@@ -25,7 +25,7 @@ from binascii import unhexlify as uhx
 from pathlib import Path
 
 SRC_ROOT = Path("src")
-AEROLIB_BIN = Path("src/SharpEmu.HLE/Aerolib/aerolib.bin")
+AEROLIB_BIN = Path("src/Hyper5.HLE/Aerolib/aerolib.bin")
 SYSABI_EXPORT_RE = re.compile(r"\[SysAbiExport\((.*?)\)\]", re.DOTALL)
 NID_RE = re.compile(r'Nid\s*=\s*"([^"]+)"')
 EXPORT_NAME_RE = re.compile(r'ExportName\s*=\s*"([^"]+)"')

@@ -10,7 +10,7 @@ from binascii import unhexlify as uhx
 from pathlib import Path
 
 NAMES = 'scripts/ps5_names.txt'
-OUTPUT = 'src/SharpEmu.HLE/Aerolib/aerolib.bin'
+OUTPUT = 'src/Hyper5.HLE/Aerolib/aerolib.bin'
 
 def name2nid(name):
     symbol = hashlib.sha1(name.encode() + uhx('518D64A635DED8C1E6B039B1C3E55230')).digest()

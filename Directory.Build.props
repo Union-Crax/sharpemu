@@ -20,11 +20,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>true</AppendRuntimeIdentifierToOutputPath>
 
-    <PublishDir>$(RepoRoot)artifacts/publish/$(MSBuildProjectName)/$(Configuration)/$(TargetFramework)/</PublishDir>
+    <PublishArtifactName>$(MSBuildProjectName)</PublishArtifactName>
+    <PublishArtifactName Condition="'$(MSBuildProjectName)' == 'Hyper5.CLI'">Hyper5</PublishArtifactName>
+    <PublishDir>$(RepoRoot)artifacts/publish/$(PublishArtifactName)/$(Configuration)/$(TargetFramework)/</PublishDir>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
-    <PublishDir>$(RepoRoot)artifacts/publish/$(MSBuildProjectName)/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/</PublishDir>
+    <PublishDir>$(RepoRoot)artifacts/publish/$(PublishArtifactName)/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)/</PublishDir>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -33,17 +35,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
-  <!-- Build provenance surfaced by SharpEmu.Logging.BuildInfo as a banner at the
+  <!-- Build provenance surfaced by Hyper5.Logging.BuildInfo as a banner at the
        top of the log. Populated from GitHub Actions environment variables when
        building in CI; empty locally. -->
   <ItemGroup>
-    <AssemblyMetadata Include="SharpEmu.BuildConfiguration" Value="$(Configuration)" />
-    <AssemblyMetadata Condition="'$(GITHUB_SHA)' != ''" Include="SharpEmu.BuildSha" Value="$(GITHUB_SHA)" />
-    <AssemblyMetadata Condition="'$(GITHUB_REF_NAME)' != ''" Include="SharpEmu.BuildBranch" Value="$(GITHUB_REF_NAME)" />
-    <AssemblyMetadata Condition="'$(GITHUB_REF)' != ''" Include="SharpEmu.BuildRef" Value="$(GITHUB_REF)" />
-    <AssemblyMetadata Condition="'$(GITHUB_EVENT_NAME)' != ''" Include="SharpEmu.BuildEventName" Value="$(GITHUB_EVENT_NAME)" />
-    <AssemblyMetadata Condition="'$(GITHUB_REPOSITORY)' != ''" Include="SharpEmu.BuildRepository" Value="$(GITHUB_REPOSITORY)" />
-    <AssemblyMetadata Condition="'$(GITHUB_SERVER_URL)' != ''" Include="SharpEmu.BuildServerUrl" Value="$(GITHUB_SERVER_URL)" />
-    <AssemblyMetadata Condition="'$(GITHUB_RUN_ID)' != ''" Include="SharpEmu.BuildRunId" Value="$(GITHUB_RUN_ID)" />
+    <AssemblyMetadata Include="Hyper5.BuildConfiguration" Value="$(Configuration)" />
+    <AssemblyMetadata Condition="'$(GITHUB_SHA)' != ''" Include="Hyper5.BuildSha" Value="$(GITHUB_SHA)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REF_NAME)' != ''" Include="Hyper5.BuildBranch" Value="$(GITHUB_REF_NAME)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REF)' != ''" Include="Hyper5.BuildRef" Value="$(GITHUB_REF)" />
+    <AssemblyMetadata Condition="'$(GITHUB_EVENT_NAME)' != ''" Include="Hyper5.BuildEventName" Value="$(GITHUB_EVENT_NAME)" />
+    <AssemblyMetadata Condition="'$(GITHUB_REPOSITORY)' != ''" Include="Hyper5.BuildRepository" Value="$(GITHUB_REPOSITORY)" />
+    <AssemblyMetadata Condition="'$(GITHUB_SERVER_URL)' != ''" Include="Hyper5.BuildServerUrl" Value="$(GITHUB_SERVER_URL)" />
+    <AssemblyMetadata Condition="'$(GITHUB_RUN_ID)' != ''" Include="Hyper5.BuildRunId" Value="$(GITHUB_RUN_ID)" />
   </ItemGroup>
 </Project>

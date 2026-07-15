@@ -46,10 +46,10 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::7}"
           safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
-          archive_name="sharpemu-win64-${short_sha}.zip"
-          artifact_name="sharpemu-win64-${short_sha}"
+          archive_name="hyper5-win64-${short_sha}.zip"
+          artifact_name="hyper5-win64-${short_sha}"
           release_tag="win64-${safe_ref}-${short_sha}"
-          release_name="SharpEmu win64 ${short_sha}"
+          release_name="Hyper5 win64 ${short_sha}"
 
           {
             echo "short-sha=${short_sha}"
@@ -95,16 +95,16 @@ jobs:
             src/**/packages.lock.json
 
       - name: Restore solution
-        run: dotnet restore SharpEmu.slnx --locked-mode
+        run: dotnet restore Hyper5.slnx --locked-mode
 
       - name: Build solution
-        run: dotnet build SharpEmu.slnx -c Release --no-restore
+        run: dotnet build Hyper5.slnx -c Release --no-restore
 
       - name: Validate synthetic shaders
-        run: dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
+        run: dotnet run --project tools/Hyper5.Tools.ShaderDump/Hyper5.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
 
       - name: Publish win-x64 CLI
-        run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
+        run: dotnet publish src/Hyper5.CLI/Hyper5.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
 
       - name: Create release archive
         run: |

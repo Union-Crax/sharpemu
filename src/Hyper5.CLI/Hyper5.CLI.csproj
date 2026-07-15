@@ -1,0 +1,77 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hyper5.Core\Hyper5.Core.csproj" />
+    <ProjectReference Include="..\Hyper5.GUI\Hyper5.GUI.csproj" />
+    <ProjectReference Include="..\Hyper5.Logging\Hyper5.Logging.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- GUI subsystem so starting without arguments opens the frontend with no
+         console window; CLI mode re-attaches to the parent terminal's console. -->
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>Hyper5</AssemblyName>
+    <AssemblyTitle>Hyper5</AssemblyTitle>
+    <Product>Hyper5</Product>
+    <Description>An experimental PlayStation 5 emulator.</Description>
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64</RuntimeIdentifiers>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.0.1</Version>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == ''">
+    <ApplicationIcon>..\..\assets\images\Hyper5.ico</ApplicationIcon>
+    <Win32Icon>..\..\assets\images\Hyper5.ico</Win32Icon>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <Content Include="..\..\LICENSE.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <TargetPath>LICENSE.txt</TargetPath>
+      <Visible>False</Visible>
+    </Content>
+    <Content Include="..\Hyper5.GUI\Languages\*.json" Condition="'$(Configuration)' != 'Release'">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
+      <Visible>False</Visible>
+    </Content>
+  </ItemGroup>
+
+  <!-- Keep glfw as a loose file next to the executable; every other native
+       library is embedded into the single-file bundle. -->
+  <Target Name="KeepGlfwOutsideSingleFile" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_GlfwPublishFiles Include="@(ResolvedFileToPublish)"
+                         Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw'))" />
+      <ResolvedFileToPublish Remove="@(_GlfwPublishFiles)" />
+      <ResolvedFileToPublish Include="@(_GlfwPublishFiles)">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+</Project>

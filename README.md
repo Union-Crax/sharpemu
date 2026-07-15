@@ -3,7 +3,7 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-# SharpEmu
+# Hyper5
 
 <p align="center">
   <img src="./assets/images/logo.png" width=30% height=30% />
@@ -29,15 +29,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
 > Currently the primary development target is Windows.
 
 > [!WARNING]  
-> SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
+> Hyper5 is an experimental PS5 emulator developed in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
 
 ## Info
 
-SharpEmu is an emulator project currently in its early stages of development.
+Hyper5 is an emulator project currently in its early stages of development.
 
 This project is developed purely for research and educational purposes. There are no commercial goals associated with it. We enjoy learning about system architecture and reverse engineering.
 
-SharpEmu focuses exclusively on the PlayStation 5.  
+Hyper5 focuses exclusively on the PlayStation 5.
 Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
 
 ## Status
@@ -66,7 +66,7 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 * Build or Publish project or download in release tab.
 * Open Powershell.
   * Run Emulator GUI.
-  * Or command: `.\SharpEmu "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
+  * Or command: `.\Hyper5 "eboot.bin" 2>&1 | Tee-Object -FilePath "log.txt"`
 
 ## Games Tested
 
@@ -95,20 +95,23 @@ Currently the project primarily targets Windows. Cross-platform support (Linux a
 ## Build
 
 1. Install the **.NET SDK**.
-2. Clone the repository: `git clone https://github.com/par274/sharpemu.git`
-3. Open the solution file (`SharpEmu.slnx`) in **VSCode**.
+2. Clone the repository: `git clone https://github.com/union-crax/Hyper5.git`
+3. Open the solution file (`Hyper5.slnx`) in **VSCode**.
 4. Build the project: `dotnet build` or `dotnet publish`
 5. Build artifacts will be located in the `artifacts` directory.
 
 ## Disclaimer
 
-SharpEmu is an experimental emulator intended for research and educational purposes.
+Hyper5 is an experimental emulator intended for research and educational purposes.
 
 This project does not contain any copyrighted system firmware, game data, or proprietary PlayStation assets.
 
 ## Special Thanks
 
 The following projects were extremely helpful during development:
+
+* **[SharpEmu](https://github.com/par274/sharpemu)**
+Hyper5 is based on the original SharpEmu repository. Credits to the SharpEmu project and all of its contributors.
 
 * **[ShadPS4](https://github.com/shadps4-emu/shadPS4)**  
 Helped with understanding the basic architecture of the PlayStation 4.
@@ -121,7 +124,7 @@ Provided valuable references for filesystem handling and low-level C# implementa
 
 # License
 
-- [**GPL-2.0 license**](https://github.com/par274/sharpemu/blob/main/LICENSE)
+- [**GPL-2.0 license**](https://github.com/union-crax/Hyper5/blob/main/LICENSE)
 
 ## Contributing
 
