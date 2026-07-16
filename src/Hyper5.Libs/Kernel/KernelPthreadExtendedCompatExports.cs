@@ -547,7 +547,36 @@ public static class KernelPthreadExtendedCompatExports
         lock (_stateGate)
         {
             var threadState = GetOrCreateThreadStateLocked(thread);
-            _attrStates[outAttrAddress] = threadState.Attributes;
+            var attributes = threadState.Attributes;
+
+            // Report the thread's REAL stack range. Boehm GC registers each
+            // thread with bounds from scePthreadAttrGetstackaddr/-stacksize;
+            // the default zero base made it scan garbage and crash in the
+            // mark phase. Scheduler threads report their mapped stack at
+            // creation; the host main thread's handle is created lazily, so
+            // match it to the dispatcher-published main stack on first query.
+            if (GuestThreadExecution.TryGetThreadStack(thread, out var stackBase, out var stackSize))
+            {
+                attributes = attributes with { StackAddress = stackBase, StackSize = stackSize };
+            }
+            else if (attributes.StackAddress == 0 &&
+                     !GuestThreadExecution.IsGuestThread &&
+                     GuestThreadExecution.HostMainStackBase != 0 &&
+                     thread == KernelPthreadState.GetCurrentThreadHandle())
+            {
+                attributes = attributes with
+                {
+                    StackAddress = GuestThreadExecution.HostMainStackBase,
+                    StackSize = GuestThreadExecution.HostMainStackSize,
+                };
+                GuestThreadExecution.ReportThreadStack(
+                    thread,
+                    GuestThreadExecution.HostMainStackBase,
+                    GuestThreadExecution.HostMainStackSize);
+            }
+
+            threadState.Attributes = attributes;
+            _attrStates[outAttrAddress] = attributes;
         }
 
         ctx[CpuRegister.Rax] = 0;

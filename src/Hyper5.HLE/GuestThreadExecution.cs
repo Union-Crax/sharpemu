@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace Hyper5.HLE;
@@ -153,6 +154,46 @@ public static class GuestThreadExecution
     private static ulong _currentImportReturnSlotAddress;
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
+
+    // Guest stack ranges keyed by pthread handle, reported by whoever
+    // materializes the stack: the CPU dispatcher for the host main thread,
+    // the scheduler when it creates a guest thread. Boehm GC derives each
+    // thread's conservative stack-scan range from
+    // scePthreadAttrGetstackaddr/-stacksize; a thread with no real range
+    // registers with garbage bounds and the mark phase walks off the end of
+    // mapped memory.
+    private static readonly ConcurrentDictionary<ulong, (ulong Base, ulong Size)> _threadStackRanges = new();
+
+    // The host main thread's guest stack. Its pthread handle is created
+    // lazily inside the kernel exports, so the dispatcher can only publish
+    // the range; the pthread layer matches it to the handle on first query.
+    public static ulong HostMainStackBase { get; set; }
+
+    public static ulong HostMainStackSize { get; set; }
+
+    public static void ReportThreadStack(ulong threadHandle, ulong stackBase, ulong stackSize)
+    {
+        if (threadHandle == 0 || stackBase == 0 || stackSize == 0)
+        {
+            return;
+        }
+
+        _threadStackRanges[threadHandle] = (stackBase, stackSize);
+    }
+
+    public static bool TryGetThreadStack(ulong threadHandle, out ulong stackBase, out ulong stackSize)
+    {
+        if (_threadStackRanges.TryGetValue(threadHandle, out var range))
+        {
+            stackBase = range.Base;
+            stackSize = range.Size;
+            return true;
+        }
+
+        stackBase = 0;
+        stackSize = 0;
+        return false;
+    }
 
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 

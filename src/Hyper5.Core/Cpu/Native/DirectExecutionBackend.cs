@@ -3405,6 +3405,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return false;
 		}
+		GuestThreadExecution.ReportThreadStack(request.ThreadHandle, stackBase, GuestThreadStackSize);
 		if (!TryMapGuestThreadTlsRegion(virtualMemory, out var tlsBase, out error))
 		{
 			return false;

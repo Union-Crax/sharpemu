@@ -296,17 +296,38 @@ the VEH currently treats as fatal. Diagnostics added this commit: VirtualQuery
 and DirectMemoryQuery now log args+result, InstallExceptionHandler /
 RemoveExceptionHandler log signo+handler.
 
+**Ninth run (with HYPER5_LOG_DIRECT_MEMORY=1) — root cause found.** The trace
+answered everything: (1) the game installs ONLY a signo=30 handler, so
+fault-probing is not expected behavior; (2) the GC heap is exactly four 256KB
+direct mappings 0x10000000..0x10100000, matching the AV region end; (3) the AV
+is deterministic (identical registers across runs) and follows Boehm's own
+`thread not found in gc_threads` — main was never registered with the GC.
+Why: Boehm registers a thread using stack bounds from `scePthreadAttrGet` +
+`scePthreadAttrGetstackaddr/-stacksize`, and our `PthreadAttrState.Default`
+carried **StackAddress=0** (placeholder 1MB size) for every thread not
+created through `scePthreadCreate` — i.e. the host main thread. Garbage stack
+bounds → broken registration → the collector scans nonsense and the mark
+walk runs off the end of the heap at 0x101003B0.
+
+**Fix (this commit): report real guest stack ranges.**
+`GuestThreadExecution` gained a per-handle stack-range registry plus
+`HostMainStackBase/Size`. `CpuDispatcher` publishes the main thread's mapped
+stack (base from `TryMapStackRegion`, size 0x200000);
+`DirectExecutionBackend.TryCreateGuestThreadState` reports each created guest
+thread's stack; `scePthreadAttrGet` overlays the real range into the returned
+attributes (and matches the lazily-created main-thread handle to the
+dispatcher-published range on first query). Scheduler threads previously had
+the same zero-base defect — Boehm registers every Unity thread on start, so
+this also pre-empts the identical crash on the helper threads.
+
 **Next steps:**
-1. Re-run with env `HYPER5_LOG_DIRECT_MEMORY=1` (adds map_flexible/map_direct
-   traces) and collect the log. Key questions: does the game install a
-   signo=11 handler at boot? What did VirtualQuery return for the addresses
-   Boehm queried? What flexible mappings back 0x100xxxxx and do their recorded
-   bounds match the AV region dump?
-2. Fix accordingly: register loader segments (and stacks) as queryable
-   regions so find-next works, correct any mis-recorded mapping length, or —
-   if a signo=11 handler exists — route guest AVs from the VEH to the guest
-   handler instead of dying (fault-probing is normal Boehm behavior on real
-   hardware).
+1. Re-run. Expect no `thread not found in gc_threads`, and boot to proceed
+   past the first collection. If a new stall/crash appears, diff the log
+   against HANDOFF notes — remaining known gaps: VirtualQuery can't see
+   loader module segments (find-next at 0x600100000 is still NOT_FOUND;
+   Boehm data-segment registration may want them), and the signal context
+   buffer is still zeroed (fine for the delivery test; a handler that reads
+   register state from it will misbehave).
 
 ## Suggested next steps, in priority order
 

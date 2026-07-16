@@ -179,6 +179,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        Hyper5.HLE.GuestThreadExecution.HostMainStackBase = stackBase;
+        Hyper5.HLE.GuestThreadExecution.HostMainStackSize = StackSize;
+
         var tlsBase = TryMapTlsRegion();
         if (tlsBase == 0)
         {
