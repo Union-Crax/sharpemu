@@ -74,14 +74,18 @@ public static class KernelExceptionCompatExports
     // Unity/il2cpp's Boehm GC stop-the-world: the collector raises signal 30 on
     // each GC-registered thread, whose installed handler saves its register
     // context (for conservative stack scanning), acknowledges, and parks until
-    // the world restarts.
+    // the world restarts. Before enabling that machinery, Unity self-tests
+    // delivery at startup: it raises the signal on the CALLING thread and then
+    // waits on a condvar its handler is expected to signal.
     //
-    // Full delivery requires reconstructing the guest mcontext_t and running the
-    // handler on the TARGET thread — the Orbis mcontext layout is unverified, and
-    // writing a guessed struct would corrupt the GC's stack scan. Until the layout
-    // is confirmed (disassemble the handler this logs), this resolves the call and
-    // records the request so a real scheduler-driven delivery can be added without
-    // the guest first tripping the unresolved-import sentinel.
+    // Self-raise is delivered synchronously here, matching raise() semantics
+    // (the handler runs before this call returns). The handler's context
+    // argument points at a zeroed guest buffer rather than a reconstructed
+    // mcontext_t — that layout is unverified, and a guessed struct would
+    // corrupt the GC's conservative stack scan; zeros make a wrong read fail
+    // loudly instead. Cross-thread delivery (the real stop-the-world) needs
+    // scheduler support to run the handler on the TARGET thread and is not
+    // implemented yet.
     [SysAbiExport(
         Nid = "il03nluKfMk",
         ExportName = "sceKernelRaiseException",
@@ -92,18 +96,90 @@ public static class KernelExceptionCompatExports
         var threadHandle = ctx[CpuRegister.Rdi];
         var signum = unchecked((int)ctx[CpuRegister.Rsi]);
 
-        var hasHandler = TryGetInstalledHandler(signum, out var handler);
-        Console.Error.WriteLine(
-            $"[LOADER][WARN] sceKernelRaiseException: thread=0x{threadHandle:X16} signo={signum} " +
-            (hasHandler
-                ? $"handler=0x{handler:X16} (delivery not yet implemented; GC stop-the-world will stall)"
-                : "NO handler installed for this signal"));
-
         if (!AllowedSignals.Contains(signum))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        if (!TryGetInstalledHandler(signum, out var handler) || handler == 0)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] sceKernelRaiseException: thread=0x{threadHandle:X16} signo={signum} " +
+                "has no installed handler; dropping");
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        var currentThreadHandle = KernelPthreadState.GetCurrentThreadHandle();
+        if (threadHandle != currentThreadHandle)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] sceKernelRaiseException: cross-thread delivery not implemented " +
+                $"(target=0x{threadHandle:X16} current=0x{currentThreadHandle:X16} signo={signum} " +
+                $"handler=0x{handler:X16}); GC stop-the-world will stall");
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        if (GuestThreadExecution.Scheduler is not { } scheduler ||
+            !TryGetSignalContextBuffer(ctx, out var contextAddress))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][ERROR] sceKernelRaiseException: cannot deliver signo={signum} to self " +
+                "(no scheduler or context buffer)");
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        if (!scheduler.TryCallGuestFunction(
+                ctx,
+                handler,
+                unchecked((ulong)signum),
+                contextAddress,
+                0,
+                0,
+                "sceKernelRaiseException",
+                out var error))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][ERROR] sceKernelRaiseException: handler 0x{handler:X16} failed for " +
+                $"signo={signum}: {error}");
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] sceKernelRaiseException: delivered signo={signum} to self " +
+            $"(thread=0x{threadHandle:X16}) via handler 0x{handler:X16}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    private const ulong SignalContextBufferSize = 0x1000;
+    private static ulong _signalContextAddress;
+
+    private static bool TryGetSignalContextBuffer(CpuContext ctx, out ulong address)
+    {
+        lock (_gate)
+        {
+            if (_signalContextAddress == 0 &&
+                !KernelMemoryCompatExports.TryAllocateHleData(
+                    ctx, SignalContextBufferSize, 0x1000, out _signalContextAddress))
+            {
+                address = 0;
+                return false;
+            }
+
+            address = _signalContextAddress;
+        }
+
+        // Re-zero between deliveries so a handler never sees a previous
+        // signal's scribbles.
+        Span<byte> zeroes = stackalloc byte[512];
+        zeroes.Clear();
+        for (ulong offset = 0; offset < SignalContextBufferSize; offset += (ulong)zeroes.Length)
+        {
+            if (!ctx.Memory.TryWrite(address + offset, zeroes))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

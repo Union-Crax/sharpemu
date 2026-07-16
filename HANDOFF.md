@@ -203,18 +203,46 @@ a reconstructed guest `mcontext_t`, and that struct layout is unverified;
 guessing it would corrupt the GC's conservative stack scan (worse than a clean
 stall, per this file's own rule).
 
-**Next step — this is the current blocker.** Re-run and capture:
-1. Does the game call `sceKernelInstallExceptionHandler(30, ...)`? What handler
-   address does the new WARN line print?
-2. Disassemble that handler (it's in the il2cpp/libgc LLE module, ~`0x16A8A3…`
-   range at load) to recover which `mcontext_t`/`ucontext_t` offsets it reads —
-   that gives the real struct layout needed for delivery.
-3. Then implement delivery: record a pending signal on the target
-   `GuestThreadState`, wake it, and in `RunGuestThread` (before it resumes its
-   blocked continuation) run the handler on that thread's own context with the
-   rebuilt ucontext, preserving the original continuation to resume when the
-   handler returns (needs a nested/continuation-stack path — the single
-   `BlockedContinuation` slot isn't enough for the reentrant case).
+**Fourth run — the RaiseException target is the caller itself (self-test).**
+The new WARN plus the 20s stall telemetry pinned it down:
+
+```
+sceKernelRaiseException: thread=0x2A6862C4FC0 signo=30 handler=0x2A6880C0210
+[stall] main thread: parked in pthread_cond_wait (rcx=0xFFFFFFFF, forever)
+[stall] 13× AssetGarbageCollectorHelper + '@': Blocked in sceKernelWaitSema
+```
+
+The target handle `0x2A6862C4FC0` is allocated immediately before the first GC
+helper (`0x2A6862C5FD0`) — it's the **main thread's own pthread handle**, and
+right after raising the main thread parks in `pthread_cond_wait`. That's
+Unity's GC **signal self-test**: raise SIGUSR1 on yourself, then wait on a
+condvar until your handler runs and flips a flag. On real hardware self-raise
+delivers synchronously (like `raise()`); with no delivery, the condvar never
+signals. The handler `0x2A6880C0210` lives in the tiny launcher shim module
+(entry `0x2A6880C0010`, between exports `XAKDgxcra6k`@`01D0` and
+`J3edELK4FvM`@`0240`).
+
+Landed (`KernelExceptionCompatExports.cs`): **synchronous self-delivery**.
+`sceKernelRaiseException(target == KernelPthreadState.GetCurrentThreadHandle())`
+now invokes the installed handler on the calling thread via
+`GuestThreadExecution.Scheduler.TryCallGuestFunction(handler, signum, ctxBuf)`
+before returning — the accurate semantic for self-raise. The handler's context
+argument is a zeroed 4 KiB guest buffer (`TryAllocateHleData`, re-zeroed per
+delivery), NOT a guessed `mcontext_t` — zeros make a wrong read fail loudly
+instead of corrupting the GC's stack scan. Cross-thread delivery (the real
+stop-the-world suspend) still logs a WARN and is unimplemented.
+
+**Next steps:**
+1. Re-run. Expect `sceKernelRaiseException: delivered signo=30 to self` and the
+   main thread to get past the condvar wait. If the handler faults reading the
+   zeroed context buffer, the fault log gives the exact offset it wanted — that
+   recovers the `mcontext_t` layout for a real context.
+2. The next stall will likely be actual GC stop-the-world: cross-thread
+   RaiseException against the parked helpers. Delivery design for that case:
+   record a pending signal on the target `GuestThreadState`, wake it, and in
+   `RunGuestThread` (before resuming its blocked continuation) run the handler
+   on that thread with the rebuilt context, then re-park (needs a nested
+   continuation path — the single `BlockedContinuation` slot isn't enough).
 
 ## Suggested next steps, in priority order
 
