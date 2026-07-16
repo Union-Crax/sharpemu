@@ -358,6 +358,14 @@ public static class KernelPthreadCompatExports
     public static int PthreadCondDestroy(CpuContext ctx) => PthreadCondDestroyCore(ctx, ctx[CpuRegister.Rdi]);
 
     [SysAbiExport(
+        Nid = "RXXqi4CtF8w",
+        ExportName = "pthread_cond_destroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadCondDestroy(CpuContext ctx) =>
+        PthreadCondDestroyCore(ctx, ctx[CpuRegister.Rdi]);
+
+    [SysAbiExport(
         Nid = "WKAXJ4XBPQ4",
         ExportName = "scePthreadCondWait",
         Target = Generation.Gen4 | Generation.Gen5,

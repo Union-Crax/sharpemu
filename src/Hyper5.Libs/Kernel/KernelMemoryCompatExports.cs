@@ -3629,6 +3629,28 @@ public static partial class KernelMemoryCompatExports
     }
 
     [SysAbiExport(
+        Nid = "yDBwVAolDgg",
+        ExportName = "sceKernelIsStack",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsStack(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var startOut = ctx[CpuRegister.Rsi];
+        var endOut = ctx[CpuRegister.Rdx];
+        _ = GuestThreadExecution.TryFindThreadStack(address, out var stackBase, out var stackSize);
+        var stackEnd = stackSize <= ulong.MaxValue - stackBase ? stackBase + stackSize : ulong.MaxValue;
+
+        if ((startOut != 0 && !ctx.TryWriteUInt64(startOut, stackBase)) ||
+            (endOut != 0 && !ctx.TryWriteUInt64(endOut, stackEnd)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
         Nid = "BHouLQzh0X0",
         ExportName = "sceKernelDirectMemoryQuery",
         Target = Generation.Gen4 | Generation.Gen5,

@@ -54,6 +54,12 @@ public interface IGuestThreadScheduler
 
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
 
+    /// <summary>
+    /// Makes a parked guest thread runnable so it can process an asynchronous
+    /// interrupt without completing or discarding the wait it was parked in.
+    /// </summary>
+    bool TryWakeThreadForInterrupt(ulong threadHandle);
+
     IReadOnlyList<GuestThreadSnapshot> SnapshotThreads();
 
     bool TryCallGuestFunction(
@@ -155,6 +161,18 @@ public static class GuestThreadExecution
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
+    /// <summary>
+    /// Registered by the kernel exception layer. The scheduler invokes this at
+    /// an interrupt safe point after preserving the guest thread's current
+    /// blocked continuation.
+    /// </summary>
+    public static Func<CpuContext, bool>? PendingThreadInterruptHandler { get; set; }
+
+    public static bool TryDeliverPendingThreadInterrupts(CpuContext context)
+    {
+        return PendingThreadInterruptHandler?.Invoke(context) == true;
+    }
+
     // Guest stack ranges keyed by pthread handle, reported by whoever
     // materializes the stack: the CPU dispatcher for the host main thread,
     // the scheduler when it creates a guest thread. Boehm GC derives each
@@ -187,6 +205,31 @@ public static class GuestThreadExecution
         {
             stackBase = range.Base;
             stackSize = range.Size;
+            return true;
+        }
+
+        stackBase = 0;
+        stackSize = 0;
+        return false;
+    }
+
+    public static bool TryFindThreadStack(ulong address, out ulong stackBase, out ulong stackSize)
+    {
+        foreach (var range in _threadStackRanges.Values)
+        {
+            if (address >= range.Base && address - range.Base < range.Size)
+            {
+                stackBase = range.Base;
+                stackSize = range.Size;
+                return true;
+            }
+        }
+
+        if (HostMainStackBase != 0 && HostMainStackSize != 0 &&
+            address >= HostMainStackBase && address - HostMainStackBase < HostMainStackSize)
+        {
+            stackBase = HostMainStackBase;
+            stackSize = HostMainStackSize;
             return true;
         }
 

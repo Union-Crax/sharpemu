@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Text;
+using Hyper5.Core.Cpu.Native;
 using Hyper5.HLE;
 using Hyper5.Libs.Kernel;
 using Xunit;
@@ -947,6 +948,127 @@ public sealed class PosixKernelExportsTests : IDisposable
         Assert.Equal(ulong.MaxValue, _ctx[CpuRegister.Rax]);
     }
 
+    [Fact]
+    public void KernelIsStack_ReturnsRegisteredGuestStackBounds()
+    {
+        var thread = KernelPthreadState.CreateThreadHandle("is-stack-target");
+        const ulong StackBase = GuestBase + 0x20_000;
+        const ulong StackSize = 0x8_000;
+        GuestThreadExecution.ReportThreadStack(thread, StackBase, StackSize);
+
+        _ctx[CpuRegister.Rdi] = StackBase + 0x1234;
+        _ctx[CpuRegister.Rsi] = StructAddress;
+        _ctx[CpuRegister.Rdx] = StructAddress + 8;
+        Assert.Equal(0, KernelMemoryCompatExports.KernelIsStack(_ctx));
+        Assert.True(_ctx.TryReadUInt64(StructAddress, out var start));
+        Assert.True(_ctx.TryReadUInt64(StructAddress + 8, out var end));
+        Assert.Equal(StackBase, start);
+        Assert.Equal(StackBase + StackSize, end);
+
+        _ctx[CpuRegister.Rdi] = GuestBase + 0x1000;
+        Assert.Equal(0, KernelMemoryCompatExports.KernelIsStack(_ctx));
+        Assert.True(_ctx.TryReadUInt64(StructAddress, out start));
+        Assert.True(_ctx.TryReadUInt64(StructAddress + 8, out end));
+        Assert.Equal(0UL, start);
+        Assert.Equal(0UL, end);
+    }
+
+    [Fact]
+    public void PosixPthreadCondDestroy_UsesExistingCondDestroyCore()
+    {
+        const ulong CondAddress = GuestBase + 0x5_800;
+        _ctx[CpuRegister.Rdi] = CondAddress;
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadCondInit(_ctx));
+        Assert.Equal(0, KernelPthreadCompatExports.PosixPthreadCondDestroy(_ctx));
+    }
+
+    [Fact]
+    public void Sse4aBitFieldHelpers_MatchInsertqAndExtrqSemantics()
+    {
+        Assert.Equal(
+            0x0123_4567_89AB_77EFUL,
+            DirectExecutionBackend.InsertBitField(
+                0x0123_4567_89AB_CDEF,
+                0x0011_2233_4455_6677,
+                length: 8,
+                index: 8));
+        Assert.Equal(
+            0xCDUL,
+            DirectExecutionBackend.ExtractBitField(
+                0x0123_4567_89AB_CDEF,
+                length: 8,
+                index: 8));
+        Assert.Equal(
+            0xFEDC_BA98_7654_3210UL,
+            DirectExecutionBackend.InsertBitField(
+                0,
+                0xFEDC_BA98_7654_3210,
+                length: 64,
+                index: 0));
+    }
+
+    [Fact]
+    public void RaiseException_ForceWakesParkedSchedulerGuestThread()
+    {
+        const int Signal = 10;
+        const ulong Handler = 0x1234_5000;
+        var targetThread = KernelPthreadState.CreateThreadHandle("signal-target");
+        var scheduler = new RecordingGuestThreadScheduler(targetThread);
+        var previousScheduler = GuestThreadExecution.Scheduler;
+        GuestThreadExecution.Scheduler = scheduler;
+
+        try
+        {
+            _ctx[CpuRegister.Rdi] = Signal;
+            _ctx[CpuRegister.Rsi] = Handler;
+            Assert.Equal(0, KernelExceptionCompatExports.InstallExceptionHandler(_ctx));
+
+            _ctx[CpuRegister.Rdi] = targetThread;
+            _ctx[CpuRegister.Rsi] = Signal;
+            Assert.Equal(0, KernelExceptionCompatExports.RaiseException(_ctx));
+            Assert.Equal(targetThread, scheduler.InterruptWakeThreadHandle);
+
+            // Drain the static pending-signal queue and verify that delivery is
+            // performed with the target thread identity.
+            _ctx.Rip = 0x8_0123_4560;
+            _ctx.Rflags = 0x246;
+            _ctx.FsBase = 0x6_0040_0000;
+            _ctx.GsBase = 0x6_0041_0000;
+            _ctx[CpuRegister.Rsp] = StackAddress;
+            _ctx[CpuRegister.Rbp] = StackAddress + 0x100;
+            _ctx[CpuRegister.R12] = 0x1212_1212_1212_1212;
+            var previousGuestThread = GuestThreadExecution.EnterGuestThread(targetThread);
+            try
+            {
+                Assert.True(KernelExceptionCompatExports.TryDeliverPendingSignals(_ctx));
+            }
+            finally
+            {
+                GuestThreadExecution.RestoreGuestThread(previousGuestThread);
+            }
+
+            Assert.Equal(1, scheduler.GuestFunctionCallCount);
+            var mcontext = scheduler.GuestFunctionArg1 + 0x40;
+            Assert.True(_ctx.TryReadUInt64(mcontext + 0x60, out var savedR12));
+            Assert.True(_ctx.TryReadUInt64(mcontext + 0xA0, out var savedRip));
+            Assert.True(_ctx.TryReadUInt64(mcontext + 0xB8, out var savedRsp));
+            Assert.True(_ctx.TryReadUInt64(mcontext + 0xC8, out var mcontextLength));
+            Assert.True(_ctx.TryReadUInt64(mcontext + 0x440, out var savedFsBase));
+            Assert.Equal(0x1212_1212_1212_1212UL, savedR12);
+            Assert.Equal(_ctx.Rip, savedRip);
+            Assert.Equal(StackAddress, savedRsp);
+            Assert.Equal(0x480UL, mcontextLength);
+            Assert.Equal(_ctx.FsBase, savedFsBase);
+        }
+        finally
+        {
+            _ctx[CpuRegister.Rdi] = Signal;
+            _ = KernelExceptionCompatExports.RemoveExceptionHandler(_ctx);
+            GuestThreadExecution.Scheduler = previousScheduler;
+        }
+    }
+
     private void WriteFdSet(ulong setAddress, int[] fds)
     {
         Span<byte> words = stackalloc byte[128]; // 1024 bits
@@ -989,6 +1111,73 @@ public sealed class PosixKernelExportsTests : IDisposable
         BinaryPrimitives.WriteUInt64LittleEndian(entry, baseAddress);
         BinaryPrimitives.WriteUInt64LittleEndian(entry[8..], length);
         Assert.True(_memory.TryWrite(tableAddress + ((ulong)index * 16UL), entry));
+    }
+
+    private sealed class RecordingGuestThreadScheduler(ulong targetThread) : IGuestThreadScheduler
+    {
+        public bool SupportsGuestContextTransfer => true;
+
+        public ulong InterruptWakeThreadHandle { get; private set; }
+
+        public int GuestFunctionCallCount { get; private set; }
+
+        public ulong GuestFunctionArg1 { get; private set; }
+
+        public bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error)
+        {
+            error = "not supported by test scheduler";
+            return false;
+        }
+
+        public bool TryJoinThread(CpuContext callerContext, ulong threadHandle, out ulong returnValue, out string? error)
+        {
+            returnValue = 0;
+            error = "not supported by test scheduler";
+            return false;
+        }
+
+        public void Pump(CpuContext callerContext, string reason)
+        {
+        }
+
+        public int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue) => 0;
+
+        public bool TryWakeThreadForInterrupt(ulong threadHandle)
+        {
+            InterruptWakeThreadHandle = threadHandle;
+            return threadHandle == targetThread;
+        }
+
+        public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads() =>
+        [
+            new GuestThreadSnapshot(targetThread, "signal-target", "Blocked", 0, null, 0, "pthread_cond_wait"),
+        ];
+
+        public bool TryCallGuestFunction(
+            CpuContext callerContext,
+            ulong entryPoint,
+            ulong arg0,
+            ulong arg1,
+            ulong stackAddress,
+            ulong stackSize,
+            string reason,
+            out string? error)
+        {
+            GuestFunctionCallCount++;
+            GuestFunctionArg1 = arg1;
+            error = null;
+            return true;
+        }
+
+        public bool TryCallGuestContinuation(
+            CpuContext callerContext,
+            GuestCpuContinuation continuation,
+            string reason,
+            out string? error)
+        {
+            error = "not supported by test scheduler";
+            return false;
+        }
     }
 
     // FakeCpuMemory plus just enough IGuestAddressSpace for the mmap reservation

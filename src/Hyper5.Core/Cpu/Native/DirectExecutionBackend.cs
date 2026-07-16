@@ -450,6 +450,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public long BlockDeadlineTimestamp { get; set; }
 
+		// Asynchronous signal delivery can interrupt a scheduler-owned thread while
+		// it is parked. Each signal handler may itself park, so preserve the waits
+		// as a stack and restore the interrupted wait when the handler returns.
+		public Stack<GuestThreadBlockFrame> SuspendedBlockFrames { get; } = new();
+
+		public bool InterruptDeliveryPending { get; set; }
+
 		public long ImportCount;
 
 		public string? LastImportNid;
@@ -462,6 +469,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public GuestContinuationRunner? ContinuationRunner { get; set; }
 	}
+
+	private readonly record struct GuestThreadBlockFrame(
+		GuestCpuContinuation Continuation,
+		string WakeKey,
+		IGuestThreadBlockWaiter? Waiter,
+		long DeadlineTimestamp,
+		string? Reason);
 
 	private sealed class GuestContinuationRunner : IDisposable
 	{
@@ -2919,6 +2933,106 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return wakeCount;
 	}
 
+	public bool TryWakeThreadForInterrupt(ulong threadHandle)
+	{
+		var wakeQueued = false;
+		using (LockGate("WakeThreadForInterrupt"))
+		{
+			if (!_guestThreads.TryGetValue(threadHandle, out var thread))
+			{
+				return false;
+			}
+
+			// Multiple signals queued before this thread is dispatched share one
+			// interrupt safe point; the kernel queue drains them there.
+			if (thread.InterruptDeliveryPending)
+			{
+				return true;
+			}
+
+			// The target may be inside the HLE wait call which is about to park
+			// it. Remember the interrupt now; the Blocked exit path below will
+			// preserve that newly captured continuation and immediately re-ready
+			// the thread for delivery.
+			if (thread.State == GuestThreadRunState.Running)
+			{
+				thread.InterruptDeliveryPending = true;
+				return true;
+			}
+
+			if (thread.State != GuestThreadRunState.Blocked || !thread.HasBlockedContinuation)
+			{
+				return false;
+			}
+
+			thread.SuspendedBlockFrames.Push(CaptureBlockedFrame(thread));
+			ClearBlockedFrame(thread);
+			thread.InterruptDeliveryPending = true;
+			thread.State = GuestThreadRunState.Ready;
+			thread.BlockReason = null;
+			_readyGuestThreads.Enqueue(thread);
+			Interlocked.Increment(ref _readyGuestThreadCount);
+			wakeQueued = true;
+		}
+
+		if (wakeQueued && _cpuContext is { } wakeContext)
+		{
+			Pump(wakeContext, "interrupt");
+		}
+
+		return wakeQueued;
+	}
+
+	private static GuestThreadBlockFrame CaptureBlockedFrame(GuestThreadState thread)
+	{
+		return new GuestThreadBlockFrame(
+			thread.BlockedContinuation,
+			thread.BlockWakeKey ?? string.Empty,
+			thread.BlockWaiter,
+			thread.BlockDeadlineTimestamp,
+			thread.BlockReason);
+	}
+
+	private static void ClearBlockedFrame(GuestThreadState thread)
+	{
+		thread.BlockedContinuation = default;
+		thread.HasBlockedContinuation = false;
+		thread.BlockWakeKey = null;
+		thread.BlockWaiter = null;
+		thread.BlockDeadlineTimestamp = 0;
+	}
+
+	// Called under the guest-thread gate. A wake which happened while this
+	// frame was suspended remains observable in its waiter and is consumed now.
+	private bool TryRestoreSuspendedBlockFrame(GuestThreadState thread)
+	{
+		if (!thread.SuspendedBlockFrames.TryPop(out var frame))
+		{
+			return false;
+		}
+
+		thread.BlockedContinuation = frame.Continuation;
+		thread.HasBlockedContinuation = true;
+		thread.BlockWakeKey = frame.WakeKey;
+		thread.BlockWaiter = frame.Waiter;
+		thread.BlockDeadlineTimestamp = frame.DeadlineTimestamp;
+		thread.State = GuestThreadRunState.Blocked;
+		thread.BlockReason = frame.Reason;
+
+		var deadlineExpired = frame.DeadlineTimestamp != 0 &&
+			frame.DeadlineTimestamp <= Stopwatch.GetTimestamp();
+		if (deadlineExpired || (frame.Waiter is not null && frame.Waiter.TryWake()))
+		{
+			thread.State = GuestThreadRunState.Ready;
+			thread.BlockReason = null;
+			thread.BlockDeadlineTimestamp = 0;
+			_readyGuestThreads.Enqueue(thread);
+			Interlocked.Increment(ref _readyGuestThreadCount);
+		}
+
+		return true;
+	}
+
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
 	{
 		using (LockGate("SnapshotThreads"))
@@ -3665,19 +3779,61 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			GuestCpuContinuation continuation = default;
 			IGuestThreadBlockWaiter? blockWaiter = null;
 			var resumeContinuation = false;
+			var deliverInterrupt = false;
+			GuestCpuContinuation interruptContinuation = default;
 			using (LockGate("RunGuestThread.block"))
 			{
-				if (thread.HasBlockedContinuation)
+				if (thread.InterruptDeliveryPending)
+				{
+					thread.InterruptDeliveryPending = false;
+					deliverInterrupt = true;
+					if (thread.SuspendedBlockFrames.TryPeek(out var frame))
+					{
+						interruptContinuation = frame.Continuation;
+					}
+				}
+				else if (thread.HasBlockedContinuation)
 				{
 					continuation = thread.BlockedContinuation;
-					thread.BlockedContinuation = default;
-					thread.HasBlockedContinuation = false;
-					thread.BlockWakeKey = null;
 					blockWaiter = thread.BlockWaiter;
-					thread.BlockWaiter = null;
-					thread.BlockDeadlineTimestamp = 0;
+					ClearBlockedFrame(thread);
 					resumeContinuation = true;
 				}
+			}
+
+			if (deliverInterrupt)
+			{
+				if (interruptContinuation.Rip >= 65536 && interruptContinuation.Rsp != 0)
+				{
+					ApplyGuestContinuation(thread.Context, interruptContinuation);
+				}
+				_ = GuestThreadExecution.TryDeliverPendingThreadInterrupts(thread.Context);
+				using (LockGate("RunGuestThread.interrupt"))
+				{
+					if (thread.HasBlockedContinuation)
+					{
+						// The interrupt handler parked (Boehm's suspend handler does
+						// this after acknowledging). Its wait stays active while the
+						// interrupted guest wait remains on SuspendedBlockFrames.
+						thread.State = GuestThreadRunState.Blocked;
+						thread.BlockReason = "guest interrupt handler blocked";
+						if (thread.BlockWaiter is not null && thread.BlockWaiter.TryWake())
+						{
+							thread.State = GuestThreadRunState.Ready;
+							thread.BlockReason = null;
+							thread.BlockDeadlineTimestamp = 0;
+							_readyGuestThreads.Enqueue(thread);
+							Interlocked.Increment(ref _readyGuestThreadCount);
+						}
+					}
+					else if (!TryRestoreSuspendedBlockFrame(thread))
+					{
+						thread.State = GuestThreadRunState.Faulted;
+						thread.BlockReason = "interrupt wake lost its suspended continuation";
+					}
+				}
+
+				return;
 			}
 
 			if (blockWaiter is not null)
@@ -3700,13 +3856,30 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				switch (exitReason)
 				{
 					case GuestNativeCallExitReason.Returned:
-						thread.ExitValue = thread.Context[CpuRegister.Rax];
-						thread.State = GuestThreadRunState.Exited;
+						if (!TryRestoreSuspendedBlockFrame(thread))
+						{
+							thread.ExitValue = thread.Context[CpuRegister.Rax];
+							thread.State = GuestThreadRunState.Exited;
+						}
 						break;
 					case GuestNativeCallExitReason.Blocked:
-						thread.State = GuestThreadRunState.Blocked;
-						thread.BlockReason = blockReason;
-						if (thread.HasBlockedContinuation &&
+						if (thread.InterruptDeliveryPending && thread.HasBlockedContinuation)
+						{
+							thread.BlockReason = blockReason;
+							thread.SuspendedBlockFrames.Push(CaptureBlockedFrame(thread));
+							ClearBlockedFrame(thread);
+							thread.State = GuestThreadRunState.Ready;
+							thread.BlockReason = null;
+							_readyGuestThreads.Enqueue(thread);
+							Interlocked.Increment(ref _readyGuestThreadCount);
+						}
+						else
+						{
+							thread.State = GuestThreadRunState.Blocked;
+							thread.BlockReason = blockReason;
+						}
+						if (thread.State == GuestThreadRunState.Blocked &&
+							thread.HasBlockedContinuation &&
 							thread.BlockWaiter is not null &&
 							thread.BlockWaiter.TryWake())
 						{

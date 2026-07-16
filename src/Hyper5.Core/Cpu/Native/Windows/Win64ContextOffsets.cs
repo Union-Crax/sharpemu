@@ -30,4 +30,7 @@ internal static class Win64ContextOffsets
     public const int R14 = 232;
     public const int R15 = 240;
     public const int Rip = 248;
+    // XMM_SAVE_AREA32 begins at 0x100 in CONTEXT; its XmmRegisters array is
+    // at +0xA0. Each register occupies 16 bytes.
+    public const int Xmm0 = 0x1A0;
 }

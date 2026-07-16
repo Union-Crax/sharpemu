@@ -124,6 +124,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (exceptionCode == WindowsFaultCodes.IllegalInstruction &&
+				TryEmulateSse4aInstruction(contextRecord, rip))
+			{
+				return -1;
+			}
 			if (IsBenignHostDebugException(exceptionCode))
 			{
 				return -1;
@@ -306,6 +311,18 @@ public sealed partial class DirectExecutionBackend
 					break;
 				case WindowsFaultCodes.IllegalInstruction:
 					Console.Error.WriteLine("[LOADER][INFO]   Type: Illegal Instruction");
+					byte[] illegalCode = new byte[32];
+					if (TryReadHostBytes(rip, illegalCode))
+					{
+						Console.Error.WriteLine("[LOADER][INFO]   Code at RIP: " + BitConverter.ToString(illegalCode).Replace("-", " "));
+					}
+					byte[] illegalWindow = new byte[64];
+					if (rip >= 32 && TryReadHostBytes(rip - 32, illegalWindow))
+					{
+						Console.Error.WriteLine("[LOADER][INFO]   Code window [RIP-0x20..]: " + BitConverter.ToString(illegalWindow).Replace("-", " "));
+					}
+					DumpRecentImportTrace();
+					DumpGuestDisasmDiagnostics(rip, rbp);
 					break;
 			}
 
@@ -317,6 +334,152 @@ public sealed partial class DirectExecutionBackend
 		{
 			_vectoredHandlerDepth--;
 		}
+	}
+
+	// PS4's Jaguar CPU supports AMD SSE4a, while many Intel hosts do not.
+	// Emulate EXTRQ/INSERTQ from the Windows exception CONTEXT and resume at
+	// the following instruction. These instructions do not affect RFLAGS.
+	private unsafe static bool TryEmulateSse4aInstruction(void* contextRecord, ulong rip)
+	{
+		if (!OperatingSystem.IsWindows() || rip < 65536)
+		{
+			return false;
+		}
+
+		byte* code = (byte*)rip;
+		var prefix = code[0];
+		if (prefix is not (0x66 or 0xF2))
+		{
+			return false;
+		}
+
+		var offset = 1;
+		byte rex = 0;
+		if ((code[offset] & 0xF0) == 0x40)
+		{
+			rex = code[offset++];
+		}
+
+		if (code[offset++] != 0x0F)
+		{
+			return false;
+		}
+
+		var opcode = code[offset++];
+		if (opcode is not (0x78 or 0x79))
+		{
+			return false;
+		}
+
+		var modRm = code[offset++];
+		if ((modRm & 0xC0) != 0xC0)
+		{
+			return false;
+		}
+
+		var reg = ((modRm >> 3) & 7) | ((rex & 4) != 0 ? 8 : 0);
+		var rm = (modRm & 7) | ((rex & 1) != 0 ? 8 : 0);
+		int length;
+		int index;
+		int destination;
+		ulong sourceLow;
+
+		if (opcode == 0x78)
+		{
+			length = code[offset++] & 0x3F;
+			index = code[offset++] & 0x3F;
+			if (prefix == 0xF2)
+			{
+				destination = reg;
+				sourceLow = ReadContextXmmLow(contextRecord, rm);
+			}
+			else
+			{
+				// The immediate EXTRQ encoding is /0; the r/m field names
+				// the sole source/destination register.
+				if ((modRm & 0x38) != 0)
+				{
+					return false;
+				}
+				destination = rm;
+				sourceLow = ReadContextXmmLow(contextRecord, destination);
+			}
+		}
+		else
+		{
+			destination = reg;
+			var controlLow = ReadContextXmmLow(contextRecord, rm);
+			var controlHigh = ReadContextXmmHigh(contextRecord, rm);
+			if (prefix == 0xF2)
+			{
+				sourceLow = controlLow;
+				length = (int)(controlHigh & 0x3F);
+				index = (int)((controlHigh >> 8) & 0x3F);
+			}
+			else
+			{
+				sourceLow = ReadContextXmmLow(contextRecord, destination);
+				length = (int)(controlLow & 0x3F);
+				index = (int)((controlLow >> 8) & 0x3F);
+			}
+		}
+
+		if (!TryNormalizeSse4aBitRange(length, index, out var effectiveLength))
+		{
+			return false;
+		}
+
+		ulong result;
+		if (prefix == 0xF2)
+		{
+			var destinationLow = ReadContextXmmLow(contextRecord, destination);
+			result = InsertBitField(destinationLow, sourceLow, effectiveLength, index);
+		}
+		else
+		{
+			result = ExtractBitField(sourceLow, effectiveLength, index);
+		}
+
+		WriteContextXmm(contextRecord, destination, result, 0);
+		WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)offset);
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] Emulated SSE4a {(prefix == 0xF2 ? "INSERTQ" : "EXTRQ")} " +
+			$"at 0x{rip:X16} xmm{destination} length={effectiveLength} index={index}");
+		return true;
+	}
+
+	internal static ulong InsertBitField(ulong destination, ulong source, int length, int index)
+	{
+		var mask = length == 64 ? ulong.MaxValue : (1UL << length) - 1;
+		var shiftedMask = index == 0 ? mask : mask << index;
+		var shiftedSource = index == 0 ? source & mask : (source & mask) << index;
+		return (destination & ~shiftedMask) | shiftedSource;
+	}
+
+	internal static ulong ExtractBitField(ulong source, int length, int index)
+	{
+		var shifted = index == 0 ? source : source >> index;
+		return length == 64 ? shifted : shifted & ((1UL << length) - 1);
+	}
+
+	private static bool TryNormalizeSse4aBitRange(int length, int index, out int effectiveLength)
+	{
+		length &= 0x3F;
+		index &= 0x3F;
+		effectiveLength = length == 0 ? 64 : length;
+		return (length != 0 || index == 0) && index + effectiveLength <= 64;
+	}
+
+	private unsafe static ulong ReadContextXmmLow(void* contextRecord, int register) =>
+		ReadCtxU64(contextRecord, Win64ContextOffsets.Xmm0 + register * 16);
+
+	private unsafe static ulong ReadContextXmmHigh(void* contextRecord, int register) =>
+		ReadCtxU64(contextRecord, Win64ContextOffsets.Xmm0 + register * 16 + 8);
+
+	private unsafe static void WriteContextXmm(void* contextRecord, int register, ulong low, ulong high)
+	{
+		WriteCtxU64(contextRecord, Win64ContextOffsets.Xmm0 + register * 16, low);
+		WriteCtxU64(contextRecord, Win64ContextOffsets.Xmm0 + register * 16 + 8, high);
 	}
 
 	private static bool IsBenignHostDebugException(uint exceptionCode)

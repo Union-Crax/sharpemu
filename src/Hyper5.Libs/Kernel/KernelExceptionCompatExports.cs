@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using Hyper5.HLE;
 
@@ -20,6 +21,11 @@ public static class KernelExceptionCompatExports
     // handler match the thread the signal was aimed at.
     private static readonly ConcurrentDictionary<ulong, ConcurrentQueue<int>> _pendingSignals = new();
     private static int _pendingSignalCount;
+
+    static KernelExceptionCompatExports()
+    {
+        GuestThreadExecution.PendingThreadInterruptHandler = TryDeliverPendingSignals;
+    }
 
     [SysAbiExport(
         Nid = "WkwEd3N7w0Y",
@@ -98,9 +104,9 @@ public static class KernelExceptionCompatExports
     // is queued and runs on the target thread at its next wait-poll safe
     // point (see TryDeliverPendingSignals). In both cases the handler's
     // context argument points at a zeroed guest buffer rather than a
-    // reconstructed mcontext_t — that layout is unverified, and a guessed
-    // struct would corrupt the GC's conservative stack scan; zeros make a
-    // wrong read fail loudly instead.
+    // Orbis ucontext_t populated from the interrupted guest registers. Boehm
+    // reads its stack pointer and callee-saved registers for conservative
+    // scanning after the suspend handler acknowledges.
     [SysAbiExport(
         Nid = "il03nluKfMk",
         ExportName = "sceKernelRaiseException",
@@ -131,12 +137,11 @@ public static class KernelExceptionCompatExports
             queue.Enqueue(signum);
             Interlocked.Increment(ref _pendingSignalCount);
 
-            // A host-owned target (e.g. the main thread) sits in a wait poll
-            // loop and picks the signal up within milliseconds. A parked
-            // scheduler guest thread has no host thread to poll on, so its
-            // delivery waits until it is next woken and runs — call that out,
-            // it is the likely culprit if a stall follows.
+            // A host-owned target (e.g. the main thread) picks the signal up in
+            // its wait-poll loop. A scheduler-owned target is explicitly made
+            // runnable without completing the wait it was parked in.
             var targetIsSchedulerThread = false;
+            var interruptWakeQueued = false;
             if (GuestThreadExecution.Scheduler is { } snapshotScheduler)
             {
                 foreach (var snapshot in snapshotScheduler.SnapshotThreads())
@@ -144,6 +149,7 @@ public static class KernelExceptionCompatExports
                     if (snapshot.ThreadHandle == threadHandle)
                     {
                         targetIsSchedulerThread = true;
+                        interruptWakeQueued = snapshotScheduler.TryWakeThreadForInterrupt(threadHandle);
                         break;
                     }
                 }
@@ -153,7 +159,9 @@ public static class KernelExceptionCompatExports
                 $"[LOADER][INFO] sceKernelRaiseException: queued signo={signum} for " +
                 $"thread=0x{threadHandle:X16} (from=0x{currentThreadHandle:X16} handler=0x{handler:X16})" +
                 (targetIsSchedulerThread
-                    ? "; target is a scheduler guest thread — delivery deferred until it next runs"
+                    ? interruptWakeQueued
+                        ? "; scheduler guest thread scheduled for interrupt delivery"
+                        : "; scheduler guest thread was not parked; delivery queued for its next safe point"
                     : "; target delivers at its next wait poll"));
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
         }
@@ -257,21 +265,25 @@ public static class KernelExceptionCompatExports
     }
 
     private const ulong SignalContextBufferSize = 0x1000;
-    private static ulong _signalContextAddress;
+    private const ulong UcontextMcontextOffset = 0x40;
+    private const ulong McontextLength = 0x480;
+    private static readonly ConditionalWeakTable<ICpuMemory, ConcurrentDictionary<ulong, ulong>>
+        _signalContextAddresses = new();
 
     private static bool TryGetSignalContextBuffer(CpuContext ctx, out ulong address)
     {
+        var threadHandle = KernelPthreadState.GetCurrentThreadHandle();
+        var addresses = _signalContextAddresses.GetOrCreateValue(ctx.Memory);
         lock (_gate)
         {
-            if (_signalContextAddress == 0 &&
-                !KernelMemoryCompatExports.TryAllocateHleData(
-                    ctx, SignalContextBufferSize, 0x1000, out _signalContextAddress))
+            if (!addresses.TryGetValue(threadHandle, out address) &&
+                (!KernelMemoryCompatExports.TryAllocateHleData(
+                    ctx, SignalContextBufferSize, 0x1000, out address) ||
+                 !addresses.TryAdd(threadHandle, address)))
             {
                 address = 0;
                 return false;
             }
-
-            address = _signalContextAddress;
         }
 
         // Re-zero between deliveries so a handler never sees a previous
@@ -286,6 +298,38 @@ public static class KernelExceptionCompatExports
             }
         }
 
-        return true;
+        return TryPopulateSignalUcontext(ctx, address);
+    }
+
+    // PS4/PS5 use the FreeBSD-derived amd64 ucontext ABI. The first 0x40
+    // bytes are uc_sigmask plus reserved fields; uc_mcontext follows. Keep
+    // these offsets in sync with Orbis Mcontext/Ucontext.
+    private static bool TryPopulateSignalUcontext(CpuContext ctx, ulong address)
+    {
+        var mc = address + UcontextMcontextOffset;
+        return
+            Write64(0x08, ctx[CpuRegister.Rdi]) &&
+            Write64(0x10, ctx[CpuRegister.Rsi]) &&
+            Write64(0x18, ctx[CpuRegister.Rdx]) &&
+            Write64(0x20, ctx[CpuRegister.Rcx]) &&
+            Write64(0x28, ctx[CpuRegister.R8]) &&
+            Write64(0x30, ctx[CpuRegister.R9]) &&
+            Write64(0x38, ctx[CpuRegister.Rax]) &&
+            Write64(0x40, ctx[CpuRegister.Rbx]) &&
+            Write64(0x48, ctx[CpuRegister.Rbp]) &&
+            Write64(0x50, ctx[CpuRegister.R10]) &&
+            Write64(0x58, ctx[CpuRegister.R11]) &&
+            Write64(0x60, ctx[CpuRegister.R12]) &&
+            Write64(0x68, ctx[CpuRegister.R13]) &&
+            Write64(0x70, ctx[CpuRegister.R14]) &&
+            Write64(0x78, ctx[CpuRegister.R15]) &&
+            Write64(0xA0, ctx.Rip) &&
+            Write64(0xB0, ctx.Rflags == 0 ? 0x202UL : ctx.Rflags) &&
+            Write64(0xB8, ctx[CpuRegister.Rsp]) &&
+            Write64(0xC8, McontextLength) &&
+            Write64(0x440, ctx.FsBase) &&
+            Write64(0x448, ctx.GsBase);
+
+        bool Write64(ulong offset, ulong value) => ctx.TryWriteUInt64(mc + offset, value);
     }
 }

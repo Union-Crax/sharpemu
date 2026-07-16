@@ -269,11 +269,9 @@ handler therefore runs on the thread the signal was aimed at (correct
 HLE wait pumps and can even deliver a nested restart signal), and the queue is
 drained before invocation so re-entry is safe. The main thread polls its cond
 wait every ~1 ms (`DefaultSpuriousCondWakeMilliseconds`), so delivery latency
-is negligible. If the raise targets a parked scheduler guest thread instead,
-we queue + log `delivery deferred until it next runs` — that case still needs
-the pending-signal-on-GuestThreadState + wake + handler-before-resume design
-(single `BlockedContinuation` slot insufficient; needs a nested continuation
-path).
+is negligible. Parked scheduler guest threads require an explicit interrupt
+wake and nested continuation handling; that path is implemented in the later
+update below.
 
 **Seventh run — signal delivery WORKED; boot advanced to a new blocker.**
 Log showed the full expected sequence: `queued signo=30 for thread=0x...64DB0
@@ -320,14 +318,69 @@ dispatcher-published range on first query). Scheduler threads previously had
 the same zero-base defect — Boehm registers every Unity thread on start, so
 this also pre-empts the identical crash on the helper threads.
 
+**Tenth run blocker — signal targeted a parked scheduler guest thread.** The
+stack fix advanced boot by roughly 300k imports, then the GC raised signal 30
+at the `@` thread while it was parked in `pthread_cond_wait`. Queuing alone
+could never deliver it, so the collector blocked forever waiting for the
+handler ack. Scheduler interrupt wakes now preserve the parked continuation on
+a stack, run pending signal delivery on the target guest thread, and restore
+the original wait after the handler returns. If the handler itself parks (the
+Boehm suspend handler does), its continuation becomes the active wait while the
+interrupted wait remains stacked; nested restart signals use the same path.
+The Running-to-Blocked race is covered too: a raise received inside the wait
+HLE call marks interrupt delivery pending and re-readies the thread as soon as
+the wait continuation is captured. Awaiting a real-game re-run to validate the
+full suspend/ack/restart sequence.
+
+**Eleventh run — interrupt wake worked; zeroed ucontext caused a post-resume
+abort.** The log proved the scheduler path completed end to end: the `@` thread
+was force-woken, delivered signo 30, acknowledged `SuspendSemaphore`, and later
+consumed `ResumeSemaphore`. The guest then immediately called `abort()`. The
+remaining placeholder was the handler's second argument: it was a zeroed 4 KiB
+buffer, but the ABI requires an Orbis/FreeBSD-derived `ucontext_t` with
+`uc_mcontext` at offset `0x40`. The buffer is now populated with the interrupted
+thread's general registers, RIP/RSP/RFLAGS, FS/GS bases, and mcontext length.
+Scheduler targets use the preserved parked continuation as the register source,
+and context buffers are isolated per guest thread and memory instance. Awaiting
+a real-game re-run; the expected sequence is suspend ack, resume consumption,
+then continued imports instead of `libc:abort`.
+
+**Twelfth run — booted briefly; GC is stable, next failure is a late illegal
+instruction.** The ucontext fix worked: boot advanced from ~298k to ~1.29M
+imports, created Unity job/loading/GPU threads, submitted a video flip, and
+completed repeated two-thread GC suspend/ack/resume cycles. The run ended on
+`0xC000001D` at eboot address `0x8014B9B70`; the old illegal-instruction branch
+did not print opcode bytes, so its exact instruction was lost. The hottest
+unresolved NID before the crash was identified as `sceKernelIsStack`
+(`yDBwVAolDgg`), called by Unity with an address and start/end output pointers.
+It is now implemented against the real guest-thread stack registry, returning
+exclusive-end bounds for stack addresses and zero bounds otherwise. The active
+`pthread_cond_destroy` POSIX NID (`RXXqi4CtF8w`) is also wired to the existing
+destroy core. Illegal-instruction diagnostics now include a 64-byte code window,
+recent imports, and disassembly. Re-run: if the trap persists, the new `Code at
+RIP` line determines whether it is an unsupported host instruction or an
+intentional `ud2` assertion.
+
+**Thirteenth run — exact trap identified as AMD SSE4a on an Intel host.** The
+new opcode diagnostics captured `F2 0F 78 C0 08 08`, which is
+`INSERTQ xmm0, xmm0, 8, 8`. PS4's AMD Jaguar supports SSE4a; Intel hosts do
+not, so direct execution raised `0xC000001D` despite the instruction being
+valid guest code. The Windows exception bridge now emulates immediate and
+register forms of SSE4a `INSERTQ` and `EXTRQ` from the captured XMM state,
+advances RIP, preserves flags, and resumes execution. Bit-field helpers are
+unit-tested against the AMD/LLVM intrinsic examples. Re-run should log
+`Emulated SSE4a INSERTQ at 0x00000008014B9B70 ...` and proceed beyond the
+former deterministic trap. The same compatibility path is still needed for
+non-Windows Intel hosts if this game is tested there.
+
 **Next steps:**
-1. Re-run. Expect no `thread not found in gc_threads`, and boot to proceed
-   past the first collection. If a new stall/crash appears, diff the log
+1. Re-run. Expect `scheduler guest thread scheduled for interrupt delivery`,
+   followed by the target-thread `delivered pending signo=30` line and GC
+   progress beyond the SuspendSemaphore wait. If a new stall/crash appears, diff the log
    against HANDOFF notes — remaining known gaps: VirtualQuery can't see
    loader module segments (find-next at 0x600100000 is still NOT_FOUND;
-   Boehm data-segment registration may want them), and the signal context
-   buffer is still zeroed (fine for the delivery test; a handler that reads
-   register state from it will misbehave).
+   Boehm data-segment registration may want them). Signal context is now
+   populated, though extended FPU/vector state is not yet reconstructed.
 
 ## Suggested next steps, in priority order
 
