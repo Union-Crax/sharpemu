@@ -11,6 +11,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="src/Hyper5.HLE/Hyper5.HLE.csproj" />
     <Project Path="src/Hyper5.Libs/Hyper5.Libs.csproj" />
     <Project Path="src/Hyper5.Logging/Hyper5.Logging.csproj" />
+    <Project Path="src/Hyper5.ShaderCompiler/Hyper5.ShaderCompiler.csproj" />
+    <Project Path="src/Hyper5.ShaderCompiler.Vulkan/Hyper5.ShaderCompiler.Vulkan.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Hyper5.Libs.Tests/Hyper5.Libs.Tests.csproj" />

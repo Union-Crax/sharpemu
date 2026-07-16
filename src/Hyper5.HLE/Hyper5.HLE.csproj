@@ -13,6 +13,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Hyper5.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Hyper5.Logging\Hyper5.Logging.csproj" />
   </ItemGroup>
 

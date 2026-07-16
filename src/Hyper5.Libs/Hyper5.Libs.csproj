@@ -6,6 +6,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\Hyper5.HLE\Hyper5.HLE.csproj" />
+    <ProjectReference Include="..\Hyper5.ShaderCompiler\Hyper5.ShaderCompiler.csproj" />
+    <ProjectReference Include="..\Hyper5.ShaderCompiler.Vulkan\Hyper5.ShaderCompiler.Vulkan.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -13,6 +15,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Silk.NET.Input" />
     <PackageReference Include="Silk.NET.Vulkan" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />

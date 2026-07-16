@@ -13,7 +13,8 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Avalonia.Controls.Templates;
-using Hyper5.Libs.Pad;
+using Hyper5.HLE.Host;
+using Hyper5.HLE.Host.Windows;
 using Hyper5.Logging;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
@@ -76,7 +77,7 @@ public partial class MainWindow : Window
 
     // Controller navigation state.
     private readonly DispatcherTimer _gamepadTimer;
-    private uint _previousPadButtons;
+    private HostGamepadButtons _previousPadButtons;
     private long _navLeftNextAt;
     private long _navRightNextAt;
     private long _navUpNextAt;
@@ -190,8 +191,8 @@ public partial class MainWindow : Window
 
         Closing += (_, _) => OnWindowClosing();
 
-        DualSenseReader.EnsureStarted();
-        XInputReader.EnsureStarted();
+        WindowsDualSenseReader.EnsureStarted();
+        WindowsXInputReader.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -432,20 +433,20 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        PadState pad;
+        HostGamepadState pad;
         // DualSense wins when both are connected; XInput covers Xbox pads.
-        if (DualSenseReader.TryGetState(out pad))
+        if (WindowsDualSenseReader.TryGetState(out pad))
         {
             SetControllerPromptStyle(ControllerPromptStyle.PlayStation);
         }
-        else if (XInputReader.TryGetState(out pad))
+        else if (WindowsXInputReader.TryGetState(out pad))
         {
             SetControllerPromptStyle(ControllerPromptStyle.Xbox);
         }
         else
         {
             SetControllerPromptStyle(ControllerPromptStyle.None);
-            _previousPadButtons = 0;
+            _previousPadButtons = HostGamepadButtons.None;
             return;
         }
 
@@ -459,29 +460,29 @@ public partial class MainWindow : Window
 
         var shoulderPressed = pad.Buttons & ~_previousPadButtons;
         var pressed = pad.Buttons & ~_previousPadButtons;
-        if ((shoulderPressed & OrbisPadButton.L1) != 0)
+        if ((shoulderPressed & HostGamepadButtons.L1) != 0)
         {
             SetActivePage(0);
         }
 
-        if ((shoulderPressed & OrbisPadButton.R1) != 0)
+        if ((shoulderPressed & HostGamepadButtons.R1) != 0)
         {
             SetActivePage(1);
         }
 
-        if ((pressed & OrbisPadButton.Options) != 0)
+        if ((pressed & HostGamepadButtons.Options) != 0)
         {
             SetActivePage(_activePageIndex == 0 ? 1 : 0);
         }
 
         if (_activePageIndex != 0)
         {
-            if ((pressed & OrbisPadButton.Left) != 0)
+            if ((pressed & HostGamepadButtons.Left) != 0)
             {
                 OptionsTabControl.SelectedIndex = Math.Max(0, OptionsTabControl.SelectedIndex - 1);
             }
 
-            if ((pressed & OrbisPadButton.Right) != 0)
+            if ((pressed & HostGamepadButtons.Right) != 0)
             {
                 OptionsTabControl.SelectedIndex = Math.Min(OptionsTabControl.ItemCount - 1, OptionsTabControl.SelectedIndex + 1);
             }
@@ -491,10 +492,10 @@ public partial class MainWindow : Window
         }
 
         var now = Environment.TickCount64;
-        var left = (pad.Buttons & 0x0080) != 0 || pad.LeftX < 64;
-        var right = (pad.Buttons & 0x0020) != 0 || pad.LeftX > 192;
-        var up = (pad.Buttons & 0x0010) != 0 || pad.LeftY < 64;
-        var down = (pad.Buttons & 0x0040) != 0 || pad.LeftY > 192;
+        var left = (pad.Buttons & HostGamepadButtons.Left) != 0 || pad.LeftX < 64;
+        var right = (pad.Buttons & HostGamepadButtons.Right) != 0 || pad.LeftX > 192;
+        var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
+        var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
@@ -516,22 +517,22 @@ public partial class MainWindow : Window
             MoveSelection(_isGridView ? TilesPerRow() : 1);
         }
 
-        if ((pressed & OrbisPadButton.Cross) != 0)
+        if ((pressed & HostGamepadButtons.Cross) != 0)
         {
             LaunchSelected();
         }
 
-        if ((pressed & OrbisPadButton.Triangle) != 0)
+        if ((pressed & HostGamepadButtons.Triangle) != 0)
         {
             SetInspectorVisible(!_isInspectorVisible);
         }
 
-        if ((pressed & OrbisPadButton.Square) != 0)
+        if ((pressed & HostGamepadButtons.Square) != 0)
         {
             ConsoleToggle.IsChecked = ConsoleToggle.IsChecked != true;
         }
 
-        if ((pressed & OrbisPadButton.Circle) != 0)
+        if ((pressed & HostGamepadButtons.Circle) != 0)
         {
             if (_isInspectorVisible)
             {

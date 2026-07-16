@@ -232,11 +232,28 @@ delivery), NOT a guessed `mcontext_t` — zeros make a wrong read fail loudly
 instead of corrupting the GC's stack scan. Cross-thread delivery (the real
 stop-the-world suspend) still logs a WARN and is unimplemented.
 
+**Fifth run gotcha — STALE BUILD.** The re-run log still printed the old
+`(delivery not yet implemented; GC stop-the-world will stall)` message, which
+only exists in `bea68da`. The self-delivery fix (`164d1f1`) was never in the
+binary that ran. Always `git pull && dotnet build Hyper5.slnx` before testing.
+
+**Upstream merge (this commit).** upstream/main advanced 8 commits
+(9d88542..30fdd8d) on the pre-rename SharpEmu tree: Linux/macOS host platform
+(incl. `DirectExecutionBackend.PosixSignals.cs`!), audio/pad host seam, GPU
+backend seam + two new projects (now `Hyper5.ShaderCompiler`,
+`Hyper5.ShaderCompiler.Vulkan`), HLE hot-path allocation removal (semaphore /
+event-flag / equeue / memory / pthread exports now use `IGuestThreadBlockWaiter`
+objects instead of lambda pairs), pt/hu translations. Merge conventions used:
+`SharpEmu.`→`Hyper5.`, `SHARPEMU_`→`HYPER5_` env vars, branding strings renamed,
+copyright headers left as-is. Our fixes were re-applied onto upstream's
+refactored semaphore file; MainWindow's user GUI rework was kept and ported to
+the new `HostGamepadButtons`/`WindowsDualSenseReader` pad API.
+
 **Next steps:**
-1. Re-run. Expect `sceKernelRaiseException: delivered signo=30 to self` and the
-   main thread to get past the condvar wait. If the handler faults reading the
-   zeroed context buffer, the fault log gives the exact offset it wanted — that
-   recovers the `mcontext_t` layout for a real context.
+1. Rebuild, re-run. Expect `sceKernelRaiseException: delivered signo=30 to self`
+   and the main thread to get past the condvar wait. If the handler faults
+   reading the zeroed context buffer, the fault log gives the exact offset it
+   wanted — that recovers the `mcontext_t` layout for a real context.
 2. The next stall will likely be actual GC stop-the-world: cross-thread
    RaiseException against the parked helpers. Delivery design for that case:
    record a pending signal on the target `GuestThreadState`, wake it, and in

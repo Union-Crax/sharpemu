@@ -1,7 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using Hyper5.HLE;
+using Hyper5.Libs.Gpu;
+using Hyper5.ShaderCompiler;
 using Hyper5.Libs.Kernel;
 using Hyper5.Libs.VideoOut;
 using System.Buffers.Binary;
@@ -156,13 +159,14 @@ public static class AgcExports
     private static readonly HashSet<ulong> _tracedComputeShaders = new();
     private static readonly Dictionary<(ulong Address, uint Width, uint Height), ulong> _tracedTextureHashes = [];
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
-    private static readonly Dictionary<(ulong Ps, ulong State, Gen5PixelOutputKind Output), byte[]> _pixelSpirvCache = new();
-    private static readonly Dictionary<
-        (ulong Es, ulong EsState, ulong Ps, ulong PsState, string OutputLayout, uint Attributes),
-        (byte[] Vertex, byte[] Pixel)> _graphicsSpirvCache = new();
-    private static readonly Dictionary<
+    // Concurrent so the per-draw/per-dispatch hit path is lock-free (and no longer
+    // shares _submitTraceGate with tracing).
+    private static readonly ConcurrentDictionary<
+        (ulong Es, ulong EsState, ulong Ps, ulong PsState, ulong OutputLayout, uint OutputCount, uint Attributes),
+        (IGuestCompiledShader Vertex, IGuestCompiledShader Pixel)> _graphicsShaderCache = new();
+    private static readonly ConcurrentDictionary<
         (ulong Cs, ulong State, uint LocalX, uint LocalY, uint LocalZ),
-        byte[]> _computeSpirvCache = new();
+        IGuestCompiledShader> _computeShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
     private static readonly bool _traceAgc = string.Equals(
         Environment.GetEnvironmentVariable("HYPER5_LOG_AGC"),
@@ -333,17 +337,20 @@ public static class AgcExports
         ulong ExportShaderAddress,
         ulong PixelShaderAddress,
         uint PrimitiveType,
-        byte[] VertexSpirv,
-        byte[] PixelSpirv,
+        IGuestCompiledShader VertexShader,
+        IGuestCompiledShader PixelShader,
         uint AttributeCount,
         uint VertexCount,
         uint InstanceCount,
-        VulkanGuestIndexBuffer? IndexBuffer,
+        GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
         IReadOnlyList<Gen5VertexInputBinding> VertexInputs,
         IReadOnlyList<RenderTargetDescriptor> RenderTargets,
-        VulkanGuestRenderState RenderState);
+        // The seam-shaped view of RenderTargets, built once here so the per-frame
+        // submit path does not rebuild it for every draw of a cached translation.
+        IReadOnlyList<GuestRenderTarget> GuestTargets,
+        GuestRenderState RenderState);
 
     private sealed record TranslatedImageBinding(
         TextureDescriptor Descriptor,
@@ -2941,7 +2948,7 @@ public static class AgcExports
                         handle,
                         displayBufferIndex,
                         out var cachedDisplayBuffer) &&
-                    VulkanVideoPresenter.TrySubmitGuestImage(
+                    GuestGpu.Current.TrySubmitGuestImage(
                         cachedDisplayBuffer.Address,
                         cachedDisplayBuffer.Width,
                         cachedDisplayBuffer.Height,
@@ -2965,11 +2972,11 @@ public static class AgcExports
                         displayBufferIndex,
                         translatedDisplayBuffer,
                         "draw-fallback");
-                    var textures = CreateVulkanGuestDrawTextures(ctx, translatedDraw.Textures, out var fallbackTextureCount);
+                    var textures = CreateGuestDrawTextures(ctx, translatedDraw.Textures, out var fallbackTextureCount);
                     var globalMemoryBuffers =
-                        CreateVulkanGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
-                    VulkanVideoPresenter.SubmitTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                        CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                    GuestGpu.Current.SubmitTranslatedDraw(
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDisplayBuffer.Width,
@@ -2977,7 +2984,7 @@ public static class AgcExports
                         translatedDraw.AttributeCount);
                     TraceAgcShader(
                         $"agc.shader_present ps=0x{translatedDraw.PixelShaderAddress:X16} " +
-                        $"spirv={translatedDraw.PixelSpirv.Length} textures={textures.Count} " +
+                        $"spirv={translatedDraw.PixelShader.Payload.Length} textures={textures.Count} " +
                         $"global_buffers={globalMemoryBuffers.Count} " +
                         $"fallback={fallbackTextureCount} {translatedDisplayBuffer.Width}x{translatedDisplayBuffer.Height}");
 
@@ -3012,7 +3019,7 @@ public static class AgcExports
                              displayBufferIndex,
                              out var displayBuffer))
                 {
-                    VulkanVideoPresenter.SubmitGuestDraw(
+                    GuestGpu.Current.SubmitGuestDraw(
                         state.GuestDrawKind,
                         displayBuffer.Width,
                         displayBuffer.Height);
@@ -3379,6 +3386,7 @@ public static class AgcExports
                 $"agc.rt_writer seq={drawSequence} target=0x{target.Address:X16} " +
                 $"fmt={target.Format} tile={target.TileMode} " +
                 $"size={target.Width}x{target.Height} vertices={vertexCount} " +
+                $"prim=0x{primitiveType:X} indexed={indexed} " +
                 $"es=0x{(hasExportShader ? exportShaderAddress : 0):X16} " +
                 $"ps=0x{(hasPixelShader ? pixelShaderAddress : 0):X16}");
         }
@@ -3407,27 +3415,23 @@ public static class AgcExports
             var firstTarget = translatedDraw.RenderTargets.FirstOrDefault();
             if (firstTarget.Address != 0)
             {
-                var textures = CreateVulkanGuestDrawTextures(
+                var textures = CreateGuestDrawTextures(
                     ctx,
                     translatedDraw.Textures,
                     out _);
                 var globalMemoryBuffers =
-                    CreateVulkanGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                    CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
                 var vertexBuffers =
-                    CreateVulkanGuestVertexBuffers(translatedDraw.VertexInputs);
-                VulkanVideoPresenter.SubmitOffscreenTranslatedDraw(
-                    translatedDraw.PixelSpirv,
+                    CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                TraceRectListVertices(translatedDraw, vertexBuffers);
+                TraceGrassDrawVertices(translatedDraw, textures, vertexBuffers);
+                GuestGpu.Current.SubmitOffscreenTranslatedDraw(
+                    translatedDraw.PixelShader,
                     textures,
                     globalMemoryBuffers,
                     translatedDraw.AttributeCount,
-                    translatedDraw.RenderTargets.Select(target =>
-                        new VulkanGuestRenderTarget(
-                            target.Address,
-                            target.Width,
-                            target.Height,
-                            target.Format,
-                            target.NumberType)).ToArray(),
-                        translatedDraw.VertexSpirv,
+                    translatedDraw.GuestTargets,
+                        translatedDraw.VertexShader,
                         translatedDraw.VertexCount,
                         translatedDraw.InstanceCount,
                         translatedDraw.PrimitiveType,
@@ -3441,14 +3445,14 @@ public static class AgcExports
                     .FirstOrDefault(binding => binding.IsStorage);
                 if (storageTarget is not null)
                 {
-                    var textures = CreateVulkanGuestDrawTextures(
+                    var textures = CreateGuestDrawTextures(
                         ctx,
                         translatedDraw.Textures,
                         out _);
                     var globalMemoryBuffers =
-                        CreateVulkanGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
-                    VulkanVideoPresenter.SubmitStorageTranslatedDraw(
-                        translatedDraw.PixelSpirv,
+                        CreateGuestMemoryBuffers(translatedDraw.GlobalMemoryBindings);
+                    GuestGpu.Current.SubmitStorageTranslatedDraw(
+                        translatedDraw.PixelShader,
                         textures,
                         globalMemoryBuffers,
                         translatedDraw.AttributeCount,
@@ -3557,14 +3561,14 @@ public static class AgcExports
             .Where(target => HasPixelColorExport(pixelState, target.Slot))
             .OrderBy(target => target.Slot)
             .ToArray();
-        var renderTargetFormats = new VulkanRenderTargetFormat[renderTargets.Length];
+        var renderTargetOutputKinds = new Gen5PixelOutputKind[renderTargets.Length];
         for (var index = 0; index < renderTargets.Length; index++)
         {
             var target = renderTargets[index];
-            if (!VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+            if (!GuestGpu.Current.TryGetRenderTargetOutputKind(
                     target.Format,
                     target.NumberType,
-                    out renderTargetFormats[index]))
+                    out renderTargetOutputKinds[index]))
             {
                 error =
                     $"unsupported color target format={target.Format} number_type={target.NumberType}";
@@ -3572,16 +3576,17 @@ public static class AgcExports
             }
         }
 
-        var pixelOutputs = renderTargets
-            .Select((target, location) => new Gen5PixelOutputBinding(
-                target.Slot,
-                (uint)location,
-                renderTargetFormats[location].OutputKind))
-            .ToArray();
-        var outputLayout = string.Join(
-            ';',
-            pixelOutputs.Select(output =>
-                $"{output.GuestSlot}:{output.HostLocation}:{(int)output.Kind}"));
+        // Exact packed encoding of the output layout — guest slot (6 bits, CB targets are
+        // 0-7) plus output kind (2 bits) per target, host locations being the sequential
+        // byte positions. Replaces a per-draw LINQ + string build that allocated on every
+        // draw, cache hit or not; the target count disambiguates trailing zero bytes.
+        var outputLayout = 0UL;
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            outputLayout |= (ulong)(((renderTargets[index].Slot & 0x3Fu) << 2) |
+                (uint)renderTargetOutputKinds[index]) << (index * 8);
+        }
+
         var attributeCount = GetInterpolatedAttributeCount(pixelState);
         var exportStateFingerprint = ComputeShaderStructureFingerprint(exportEvaluation);
         var pixelStateFingerprint = ComputeShaderStructureFingerprint(pixelEvaluation);
@@ -3591,19 +3596,25 @@ public static class AgcExports
             pixelShaderAddress,
             pixelStateFingerprint,
             outputLayout,
+            (uint)renderTargets.Length,
             attributeCount);
         var totalGlobalBuffers =
             pixelEvaluation.GlobalMemoryBindings.Count +
             exportEvaluation.GlobalMemoryBindings.Count;
-        (byte[] Vertex, byte[] Pixel) compiled;
-        lock (_submitTraceGate)
-        {
-            _graphicsSpirvCache.TryGetValue(shaderKey, out compiled);
-        }
+        _graphicsShaderCache.TryGetValue(shaderKey, out var compiled);
 
         if (compiled.Vertex is null || compiled.Pixel is null)
         {
-            if (!Gen5SpirvTranslator.TryCompilePixelShader(
+            var pixelOutputs = new Gen5PixelOutputBinding[renderTargets.Length];
+            for (var location = 0; location < renderTargets.Length; location++)
+            {
+                pixelOutputs[location] = new Gen5PixelOutputBinding(
+                    renderTargets[location].Slot,
+                    (uint)location,
+                    renderTargetOutputKinds[location]);
+            }
+
+            if (!GuestGpu.Current.TryCompilePixelShader(
                     pixelState,
                     pixelEvaluation,
                     pixelOutputs,
@@ -3613,7 +3624,7 @@ public static class AgcExports
                     totalGlobalBufferCount: totalGlobalBuffers + 2,
                     imageBindingBase: 0,
                     scalarRegisterBufferIndex: totalGlobalBuffers) ||
-                !Gen5SpirvTranslator.TryCompileVertexShader(
+                !GuestGpu.Current.TryCompileVertexShader(
                     exportState,
                     exportEvaluation,
                     out var vertexShader,
@@ -3626,23 +3637,20 @@ public static class AgcExports
                 return false;
             }
 
-            compiled = (vertexShader.Spirv, pixelShader.Spirv);
-            DumpSpirv(
+            compiled = (vertexShader!, pixelShader!);
+            DumpCompiledShader(
                 "vs",
                 exportShaderAddress,
                 exportStateFingerprint,
                 compiled.Vertex,
                 exportState.Program);
-            DumpSpirv(
+            DumpCompiledShader(
                 "ps",
                 pixelShaderAddress,
                 pixelStateFingerprint,
                 compiled.Pixel,
                 pixelState.Program);
-            lock (_submitTraceGate)
-            {
-                _graphicsSpirvCache.TryAdd(shaderKey, compiled);
-            }
+            _graphicsShaderCache.TryAdd(shaderKey, compiled);
         }
 
         var imageBindings = pixelEvaluation.ImageBindings
@@ -3679,6 +3687,17 @@ public static class AgcExports
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs =
             exportEvaluation.VertexInputs ?? [];
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
+        var guestTargets = new GuestRenderTarget[renderTargets.Length];
+        for (var index = 0; index < renderTargets.Length; index++)
+        {
+            guestTargets[index] = new GuestRenderTarget(
+                renderTargets[index].Address,
+                renderTargets[index].Width,
+                renderTargets[index].Height,
+                renderTargets[index].Format,
+                renderTargets[index].NumberType);
+        }
+
         draw = new TranslatedGuestDraw(
             exportShaderAddress,
             pixelShaderAddress,
@@ -3688,11 +3707,12 @@ public static class AgcExports
             attributeCount,
             vertexCount,
             state.InstanceCount,
-            indexed ? CreateVulkanIndexBuffer(ctx, state, vertexCount) : null,
+            indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
             vertexInputs,
             renderTargets,
+            guestTargets,
             ApplyTransparentPremultipliedFillClear(
                 CreateRenderState(state.CxRegisters, renderTargets, pixelState),
                 textures,
@@ -3713,8 +3733,8 @@ public static class AgcExports
     /// Treat precisely that draw shape as an overwrite only when every MRT
     /// attachment uses the same premultiplied blend pattern.
     /// </summary>
-    private static VulkanGuestRenderState ApplyTransparentPremultipliedFillClear(
-        VulkanGuestRenderState renderState,
+    private static GuestRenderState ApplyTransparentPremultipliedFillClear(
+        GuestRenderState renderState,
         IReadOnlyList<TranslatedImageBinding> textures,
         IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
         IReadOnlyList<uint> pixelUserData)
@@ -3744,7 +3764,7 @@ public static class AgcExports
         };
     }
 
-    private static bool IsTransparentPremultipliedFillBlend(VulkanGuestBlendState blend) =>
+    private static bool IsTransparentPremultipliedFillBlend(GuestBlendState blend) =>
         blend is
         {
             Enable: true,
@@ -3753,7 +3773,7 @@ public static class AgcExports
             ColorFunc: 0,
         };
 
-    private static VulkanGuestIndexBuffer? CreateVulkanIndexBuffer(
+    private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
         SubmittedDcbState state,
         uint indexCount)
@@ -3771,7 +3791,7 @@ public static class AgcExports
         var address = state.IndexBufferAddress + byteOffset;
         return (ctx.Memory.TryRead(address, data) ||
                 KernelMemoryCompatExports.TryReadTrackedLibcHeap(address, data))
-            ? new VulkanGuestIndexBuffer(data, is32Bit)
+            ? new GuestIndexBuffer(data, is32Bit)
             : null;
     }
 
@@ -3939,19 +3959,19 @@ public static class AgcExports
         return targets;
     }
 
-    private static VulkanGuestRenderState CreateRenderState(
+    private static GuestRenderState CreateRenderState(
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> targets,
         Gen5ShaderState pixelState)
     {
         if (targets.Count == 0)
         {
-            return VulkanGuestRenderState.Default;
+            return GuestRenderState.Default;
         }
 
         var target = targets[0];
         var scissor = DecodeScissor(registers, target.Width, target.Height);
-        return new VulkanGuestRenderState(
+        return new GuestRenderState(
             targets.Select(target =>
             {
                 var blend = DecodeBlendState(registers, target.Slot);
@@ -3964,7 +3984,7 @@ public static class AgcExports
             DecodeViewport(registers, target.Width, target.Height, scissor));
     }
 
-    private static VulkanGuestBlendState DecodeBlendState(
+    private static GuestBlendState DecodeBlendState(
         IReadOnlyDictionary<uint, uint> registers,
         uint slot)
     {
@@ -3975,7 +3995,7 @@ public static class AgcExports
         }
 
         registers.TryGetValue(CbBlend0Control + slot, out var control);
-        return new VulkanGuestBlendState(
+        return new GuestBlendState(
             ((control >> 30) & 1u) != 0,
             control & 0x1Fu,
             (control >> 8) & 0x1Fu,
@@ -3987,14 +4007,14 @@ public static class AgcExports
             writeMask);
     }
 
-    private static VulkanGuestRect? DecodeScissor(
+    private static GuestRect? DecodeScissor(
         IReadOnlyDictionary<uint, uint> registers,
         uint targetWidth,
         uint targetHeight)
     {
         if (targetWidth == 0 || targetHeight == 0)
         {
-            return new VulkanGuestRect(0, 0, 0, 0);
+            return new GuestRect(0, 0, 0, 0);
         }
 
         var left = 0;
@@ -4059,22 +4079,22 @@ public static class AgcExports
             return null;
         }
 
-        return new VulkanGuestRect(
+        return new GuestRect(
             left,
             top,
             checked((uint)(right - left)),
             checked((uint)(bottom - top)));
     }
 
-    private static VulkanGuestViewport? DecodeViewport(
+    private static GuestViewport? DecodeViewport(
         IReadOnlyDictionary<uint, uint> registers,
         uint targetWidth,
         uint targetHeight,
-        VulkanGuestRect? scissor)
+        GuestRect? scissor)
     {
         if (targetWidth == 0 || targetHeight == 0)
         {
-            return new VulkanGuestViewport(0, 0, 0, 0, 0, 1);
+            return new GuestViewport(0, 0, 0, 0, 0, 1);
         }
 
         var minDepth = 0f;
@@ -4100,7 +4120,7 @@ public static class AgcExports
             xScale > 0f &&
             yScale != 0f)
         {
-            return new VulkanGuestViewport(
+            return new GuestViewport(
                 xOffset - xScale,
                 yOffset - yScale,
                 xScale * 2f,
@@ -4113,10 +4133,10 @@ public static class AgcExports
         {
             return minDepth == 0f && maxDepth == 1f
                 ? null
-                : new VulkanGuestViewport(0, 0, targetWidth, targetHeight, minDepth, maxDepth);
+                : new GuestViewport(0, 0, targetWidth, targetHeight, minDepth, maxDepth);
         }
 
-        return new VulkanGuestViewport(
+        return new GuestViewport(
             rect.X,
             rect.Y,
             rect.Width,
@@ -4293,7 +4313,7 @@ public static class AgcExports
         var blend = draw.RenderState.Blend;
         TraceAgcShader(
             $"agc.shader_draw es=0x{draw.ExportShaderAddress:X16} " +
-            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelSpirv.Length} " +
+            $"ps=0x{draw.PixelShaderAddress:X16} spirv={draw.PixelShader.Payload.Length} " +
             $"primitive=0x{draw.PrimitiveType:X} " +
             $"blend={(blend.Enable ? 1 : 0)}:{blend.ColorSrcFactor}/{blend.ColorDstFactor}/{blend.ColorFunc} " +
             $"write_mask=0x{blend.WriteMask:X} scissor={scissor} viewport={viewport} " +
@@ -4303,16 +4323,16 @@ public static class AgcExports
             $"buffers=[{buffers}] vertex=[{vertexInputs}] indices=[{indices}]");
     }
 
-    private static IReadOnlyList<VulkanGuestDrawTexture> CreateVulkanGuestDrawTextures(
+    private static IReadOnlyList<GuestDrawTexture> CreateGuestDrawTextures(
         CpuContext ctx,
         IReadOnlyList<TranslatedImageBinding> bindings,
         out int fallbackTextureCount)
     {
-        var textures = new List<VulkanGuestDrawTexture>(bindings.Count);
+        var textures = new List<GuestDrawTexture>(bindings.Count);
         fallbackTextureCount = 0;
         foreach (var binding in bindings)
         {
-            if (TryCreateVulkanGuestDrawTexture(
+            if (TryCreateGuestDrawTexture(
                     ctx,
                     binding.Descriptor,
                     binding.IsStorage,
@@ -4331,13 +4351,13 @@ public static class AgcExports
         return textures;
     }
 
-    private static IReadOnlyList<VulkanGuestMemoryBuffer> CreateVulkanGuestMemoryBuffers(
+    private static IReadOnlyList<GuestMemoryBuffer> CreateGuestMemoryBuffers(
         IReadOnlyList<Gen5GlobalMemoryBinding> bindings)
     {
-        var buffers = new VulkanGuestMemoryBuffer[bindings.Count];
+        var buffers = new GuestMemoryBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
-            buffers[index] = new VulkanGuestMemoryBuffer(
+            buffers[index] = new GuestMemoryBuffer(
                 bindings[index].BaseAddress,
                 bindings[index].Data);
         }
@@ -4345,14 +4365,14 @@ public static class AgcExports
         return buffers;
     }
 
-    private static IReadOnlyList<VulkanGuestVertexBuffer> CreateVulkanGuestVertexBuffers(
+    private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
         IReadOnlyList<Gen5VertexInputBinding> bindings)
     {
-        var buffers = new VulkanGuestVertexBuffer[bindings.Count];
+        var buffers = new GuestVertexBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
             var binding = bindings[index];
-            buffers[index] = new VulkanGuestVertexBuffer(
+            buffers[index] = new GuestVertexBuffer(
                 binding.Location,
                 binding.ComponentCount,
                 binding.DataFormat,
@@ -4366,13 +4386,13 @@ public static class AgcExports
         return buffers;
     }
 
-    private static bool TryCreateVulkanGuestDrawTexture(
+    private static bool TryCreateGuestDrawTexture(
         CpuContext ctx,
         TextureDescriptor descriptor,
         bool isStorage,
         uint mipLevel,
         IReadOnlyList<uint> samplerDescriptor,
-        out VulkanGuestDrawTexture texture)
+        out GuestDrawTexture texture)
     {
         texture = default!;
         if (descriptor.Type != Gen5TextureType2D ||
@@ -4381,6 +4401,7 @@ public static class AgcExports
             descriptor.Width > 8192 ||
             descriptor.Height > 8192)
         {
+            TraceTextureFallback(descriptor, "invalid-descriptor");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
@@ -4398,18 +4419,21 @@ public static class AgcExports
             sourceByteCount > MaxPresentedTextureBytes ||
             sourceByteCount > int.MaxValue)
         {
+            TraceTextureFallback(
+                descriptor,
+                $"invalid-byte-count:{sourceByteCount}");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
 
         if (!isStorage &&
             descriptor.Address != 0 &&
-            VulkanVideoPresenter.IsGpuGuestImageAvailable(
+            GuestGpu.Current.IsGpuGuestImageAvailable(
                 descriptor.Address,
                 descriptor.Format,
                 descriptor.NumberType))
         {
-            texture = new VulkanGuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -4423,7 +4447,7 @@ public static class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToVulkanSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor));
             return true;
         }
 
@@ -4433,14 +4457,17 @@ public static class AgcExports
             if (descriptor.Address != 0)
             {
                 var storageSource = new byte[(int)sourceByteCount];
-                if (ctx.Memory.TryRead(descriptor.Address, storageSource) &&
+                if ((ctx.Memory.TryRead(descriptor.Address, storageSource) ||
+                     KernelMemoryCompatExports.TryReadTrackedLibcHeapGpuAlias(
+                         descriptor.Address,
+                         storageSource)) &&
                     storageSource.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
                 {
                     initialPixels = storageSource;
                 }
             }
 
-            texture = new VulkanGuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -4454,13 +4481,19 @@ public static class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToVulkanSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor));
             return true;
         }
 
         var source = new byte[(int)sourceByteCount];
-        if (!ctx.Memory.TryRead(descriptor.Address, source))
+        if (!ctx.Memory.TryRead(descriptor.Address, source) &&
+            !KernelMemoryCompatExports.TryReadTrackedLibcHeapGpuAlias(
+                descriptor.Address,
+                source))
         {
+            TraceTextureFallback(
+                descriptor,
+                $"guest-read-failed:{sourceByteCount}");
             texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType);
             return true;
         }
@@ -4486,9 +4519,10 @@ public static class AgcExports
             $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
             $"dst=0x{descriptor.DstSelect:X3} " +
             $"bytes={source.Length} nonzero64={nonZero}");
+        DumpTextureSourceIfRequested(descriptor, sourceWidth, source);
 
         var rgba = source;
-        texture = new VulkanGuestDrawTexture(
+        texture = new GuestDrawTexture(
             descriptor.Address,
             descriptor.Width,
             descriptor.Height,
@@ -4502,11 +4536,163 @@ public static class AgcExports
             Pitch: sourceWidth,
             TileMode: descriptor.TileMode,
             DstSelect: descriptor.DstSelect,
-            Sampler: ToVulkanSampler(samplerDescriptor));
+            Sampler: ToGuestSampler(samplerDescriptor));
         return true;
     }
 
-    private static VulkanGuestDrawTexture CreateFallbackGuestDrawTexture(
+    private static int _textureFallbackTraceCount;
+
+    private static void TraceTextureFallback(
+        TextureDescriptor descriptor,
+        string reason)
+    {
+        var mode = Environment.GetEnvironmentVariable("HYPER5_TRACE_GUEST_IMAGES");
+        if ((!string.Equals(mode, "1", StringComparison.Ordinal) &&
+             !string.Equals(mode, "present", StringComparison.OrdinalIgnoreCase)) ||
+            Interlocked.Increment(ref _textureFallbackTraceCount) > 64)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] agc.texture_fallback reason={reason} " +
+            $"addr=0x{descriptor.Address:X16} type={descriptor.Type} " +
+            $"size={descriptor.Width}x{descriptor.Height} pitch={descriptor.Pitch} " +
+            $"fmt={descriptor.Format} num={descriptor.NumberType} " +
+            $"tile={descriptor.TileMode} mip={descriptor.MipLevels} " +
+            $"dst=0x{descriptor.DstSelect:X3}");
+    }
+
+
+
+    private static int _grassTraceCount;
+
+    private static void TraceGrassDrawVertices(
+        TranslatedGuestDraw draw,
+        IReadOnlyList<GuestDrawTexture> textures,
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers)
+    {
+        if (_grassTraceCount >= 6 ||
+            !textures.Any(texture => texture.Width == 288 && texture.Height == 160) ||
+            vertexBuffers.Count == 0 ||
+            Interlocked.Increment(ref _grassTraceCount) > 6)
+        {
+            return;
+        }
+
+        var text = new System.Text.StringBuilder();
+        text.Append($"agc.grassdraw prim=0x{draw.PrimitiveType:X} verts={draw.VertexCount} ");
+        text.Append($"indexed={draw.IndexBuffer is not null} buffers={vertexBuffers.Count}");
+        foreach (var buffer in vertexBuffers)
+        {
+            text.Append(
+                $"\n  loc={buffer.Location} fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount} " +
+                $"stride={buffer.Stride} offset={buffer.OffsetBytes} bytes={buffer.Data.Length}");
+            var stride = Math.Max(buffer.Stride, 4u);
+            var maxVerts = Math.Min(6, (int)((buffer.Data.Length - buffer.OffsetBytes) / stride));
+            for (var vertex = 0; vertex < maxVerts; vertex++)
+            {
+                var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
+                var components = Math.Min(4, (int)((buffer.Data.Length - baseOffset) / 4));
+                text.Append($"\n    v{vertex}:");
+                for (var c = 0; c < components; c++)
+                {
+                    text.Append($" {BitConverter.ToSingle(buffer.Data, baseOffset + c * 4):0.#####}");
+                }
+            }
+        }
+
+        TraceAgcShader(text.ToString());
+    }
+
+    private static int _rectListTraceCount;
+
+    private static void TraceRectListVertices(
+        TranslatedGuestDraw draw,
+        IReadOnlyList<GuestVertexBuffer> vertexBuffers)
+    {
+        if (draw.PrimitiveType != 0x11 ||
+            draw.IndexBuffer is not null ||
+            vertexBuffers.Count == 0 ||
+            _rectListTraceCount >= 8 ||
+            Interlocked.Increment(ref _rectListTraceCount) > 8)
+        {
+            return;
+        }
+
+        var buffer = vertexBuffers[0];
+        var stride = Math.Max(buffer.Stride, 4u);
+        var text = new System.Text.StringBuilder();
+        for (var vertex = 0; vertex < 3; vertex++)
+        {
+            var baseOffset = (int)(buffer.OffsetBytes + vertex * stride);
+            if (baseOffset + 16 > buffer.Data.Length)
+            {
+                break;
+            }
+
+            var x = BitConverter.ToSingle(buffer.Data, baseOffset);
+            var y = BitConverter.ToSingle(buffer.Data, baseOffset + 4);
+            var z = BitConverter.ToSingle(buffer.Data, baseOffset + 8);
+            var w = BitConverter.ToSingle(buffer.Data, baseOffset + 12);
+            text.Append($" v{vertex}=({x:0.###},{y:0.###},{z:0.###},{w:0.###})");
+        }
+
+        TraceAgcShader(
+            $"agc.rectlist verts={draw.VertexCount} stride={buffer.Stride} " +
+            $"fmt={buffer.DataFormat}/{buffer.NumberFormat}x{buffer.ComponentCount}{text}");
+    }
+
+    private static int _textureDumpCount;
+    private static readonly ConcurrentDictionary<string, int> _textureDumpKeys = new();
+
+    /// <summary>
+    /// Writes raw sampled-texture bytes (as read from guest memory) when
+    /// HYPER5_TEXTURE_DUMP_DIR is set, so upload-time content can be
+    /// inspected offline. File name records size and effective pitch.
+    /// </summary>
+    private static void DumpTextureSourceIfRequested(
+        in TextureDescriptor descriptor,
+        uint sourcePitch,
+        byte[] source)
+    {
+        var directory = Environment.GetEnvironmentVariable("HYPER5_TEXTURE_DUMP_DIR");
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        var key = $"0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}";
+        var occurrence = _textureDumpKeys.AddOrUpdate(key, 1, static (_, count) => count + 1);
+        // First uses plus periodic later snapshots (the game reuses the same
+        // allocation for successive full-screen images).
+        if ((occurrence > 3 && occurrence % 500 >= 3) ||
+            Interlocked.Increment(ref _textureDumpCount) > 200)
+        {
+            return;
+        }
+
+        var index = _textureDumpCount;
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(
+                directory,
+                $"{index:D3}-0x{descriptor.Address:X}-{descriptor.Width}x{descriptor.Height}" +
+                $"-p{sourcePitch}-f{descriptor.Format}-t{descriptor.TileMode}.bin");
+            File.WriteAllBytes(path, source);
+        }
+        catch (Exception exception)
+        {
+            // A bad HYPER5_TEXTURE_DUMP_DIR (permissions, invalid path)
+            // must not take the emulator down; the dump is a debug aid.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Texture dump failed: {exception.Message}");
+        }
+    }
+
+    private static GuestDrawTexture CreateFallbackGuestDrawTexture(
         bool isStorage,
         uint format,
         uint numberType)
@@ -4554,9 +4740,9 @@ public static class AgcExports
             $"size={descriptor.Width}x{descriptor.Height} bytes={source.Length} hash=0x{hash:X16}");
     }
 
-    private static VulkanGuestSampler ToVulkanSampler(IReadOnlyList<uint> descriptor) =>
+    private static GuestSampler ToGuestSampler(IReadOnlyList<uint> descriptor) =>
         descriptor.Count >= 4
-            ? new VulkanGuestSampler(
+            ? new GuestSampler(
                 descriptor[0],
                 descriptor[1],
                 descriptor[2],
@@ -4754,47 +4940,39 @@ public static class AgcExports
                 localSizeX,
                 localSizeY,
                 localSizeZ);
-            byte[] computeSpirv;
-            lock (_submitTraceGate)
-            {
-                _computeSpirvCache.TryGetValue(shaderKey, out computeSpirv!);
-            }
+            _computeShaderCache.TryGetValue(shaderKey, out var computeShader);
 
-            if (computeSpirv is null &&
-                Gen5SpirvTranslator.TryCompileComputeShader(
+            if (computeShader is null &&
+                GuestGpu.Current.TryCompileComputeShader(
                     shaderState,
                     evaluation,
                     localSizeX,
                     localSizeY,
                     localSizeZ,
-                    out var compiledCompute,
+                    out computeShader,
                     out computeError))
             {
-                computeSpirv = compiledCompute.Spirv;
-                DumpSpirv(
+                DumpCompiledShader(
                     "cs",
                     shaderAddress,
                     shaderKey.Item2,
-                    computeSpirv,
+                    computeShader!,
                     shaderState.Program);
             }
 
-            if (computeSpirv is not null)
+            if (computeShader is not null)
             {
-                lock (_submitTraceGate)
-                {
-                    _computeSpirvCache.TryAdd(shaderKey, computeSpirv);
-                }
+                _computeShaderCache.TryAdd(shaderKey, computeShader);
 
-                var textures = CreateVulkanGuestDrawTextures(
+                var textures = CreateGuestDrawTextures(
                     ctx,
                     translatedBindings,
                     out _);
                 var globalMemoryBuffers =
-                    CreateVulkanGuestMemoryBuffers(evaluation.GlobalMemoryBindings);
-                VulkanVideoPresenter.SubmitComputeDispatch(
+                    CreateGuestMemoryBuffers(evaluation.GlobalMemoryBindings);
+                GuestGpu.Current.SubmitComputeDispatch(
                     shaderAddress,
-                    computeSpirv,
+                    computeShader,
                     textures,
                     globalMemoryBuffers,
                     dispatch.GroupCountX,
@@ -4965,7 +5143,7 @@ public static class AgcExports
                     }
                 }
                 else if (source is { } cachedSourceTexture &&
-                    VulkanVideoPresenter.TrySubmitGuestImageBlit(
+                    GuestGpu.Current.TrySubmitGuestImageBlit(
                         cachedSourceTexture.Address,
                         cachedSourceTexture.Width,
                         cachedSourceTexture.Height,
@@ -5319,7 +5497,7 @@ public static class AgcExports
                                 $"pcs={string.Join(',', binding.InstructionPcs.Select(pc => $"0x{pc:X}"))}");
                         }
 
-                        if (Gen5SpirvTranslator.TryCompilePixelShader(
+                        if (GuestGpu.Current.TryCompilePixelShader(
                                  pixelState,
                                  evaluation,
                                  [new(0, 0, Gen5PixelOutputKind.Float)],
@@ -5328,7 +5506,7 @@ public static class AgcExports
                         {
                             TraceAgcShader(
                                 $"agc.shader_spirv ps=0x{pixelShaderAddress:X16} " +
-                                $"bytes={compiledPixel.Spirv.Length} bindings={evaluation.ImageBindings.Count} " +
+                                $"bytes={compiledPixel!.Payload.Length} bindings={evaluation.ImageBindings.Count} " +
                                 $"global_buffers={evaluation.GlobalMemoryBindings.Count}");
                         }
                         else
@@ -6218,14 +6396,14 @@ public static class AgcExports
         $"type={descriptor.Type} levels={descriptor.BaseLevel}-{descriptor.LastLevel} " +
         $"pitch={descriptor.Pitch} dst=0x{descriptor.DstSelect:X3}";
 
-    private static void DumpSpirv(
+    private static void DumpCompiledShader(
         string stage,
         ulong shaderAddress,
         ulong stateFingerprint,
-        byte[] spirv,
+        IGuestCompiledShader shader,
         Gen5ShaderProgram program)
     {
-        if (spirv.Length == 0 ||
+        if (shader.Payload.Length == 0 ||
             !string.Equals(
                 Environment.GetEnvironmentVariable("HYPER5_DUMP_SPIRV"),
                 "1",
@@ -6237,7 +6415,9 @@ public static class AgcExports
         var directory = Path.Combine(AppContext.BaseDirectory, "shader-dumps");
         Directory.CreateDirectory(directory);
         var name = $"{shaderAddress:X16}-{stateFingerprint:X16}.{stage}";
-        File.WriteAllBytes(Path.Combine(directory, $"{name}.spv"), spirv);
+        File.WriteAllBytes(
+            Path.Combine(directory, $"{name}.{shader.PayloadFileExtension}"),
+            shader.Payload);
 
         var lines = new List<string>(program.Instructions.Count + 2)
         {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Hyper5.HLE;
+using Hyper5.Libs.Gpu;
 using Hyper5.Libs.VideoOut;
 using System.Buffers.Binary;
 
@@ -93,7 +94,7 @@ public static class SystemServiceExports
         LibraryName = "libSceSystemService")]
     public static int SystemServiceHideSplashScreen(CpuContext ctx)
     {
-        VulkanVideoPresenter.HideSplashScreen();
+        GuestGpu.Current.HideSplashScreen();
         return ctx.SetReturn(0);
     }
 

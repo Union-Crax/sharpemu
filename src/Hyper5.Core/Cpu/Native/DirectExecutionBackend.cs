@@ -14,6 +14,7 @@ using Hyper5.Core.Loader;
 using Hyper5.Core.Memory;
 using Hyper5.HLE;
 using Hyper5.HLE.Host;
+using Hyper5.HLE.Host.Posix;
 using Hyper5.Logging;
 
 namespace Hyper5.Core.Cpu.Native;
@@ -138,15 +139,25 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const ulong GuestImageScanEnd = 36507222016uL;
 
-	private const ulong GuestThreadStackBaseAddress = 0x7FFF_E000_0000UL;
+	// The 0x7FFx window is Windows-specific; dyld and Rosetta reserve that
+	// range on macOS, so POSIX guest threads use the lower 0x6FFx window.
+	// The POSIX stack base sits a further 1GB down: the import-stub region
+	// descends from 0x7000_0000_0000 on the same 16MB grid and reaches
+	// 0x6FFF_C000_0000 at its 64-module limit, which would otherwise consume
+	// the top stack slots (on Windows the two bands are ~15TB apart).
+	private static readonly ulong GuestThreadStackBaseAddress =
+		OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_A000_0000UL;
 
-	private const ulong GuestThreadTlsBaseAddress = 0x7FFE_0000_0000UL;
+	private static readonly ulong GuestThreadTlsBaseAddress =
+		OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
 
 	private const ulong GuestThreadStackSize = 0x0020_0000UL;
 
 	private const ulong GuestThreadTlsSize = 0x0001_0000UL;
 
-	private const ulong GuestThreadTlsPrefixSize = 0x0000_1000UL;
+	// Matches CpuDispatcher.TlsPrefixSize: static TLS blocks sit below the
+	// TCB, and libc.prx already reaches beyond -0x1700 on POSIX.
+	private static readonly ulong GuestThreadTlsPrefixSize = OperatingSystem.IsWindows() ? 0x0000_1000UL : 0x0001_0000UL;
 
 	private const ulong GuestThreadRegionStride = 0x0100_0000UL;
 
@@ -434,9 +445,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public string? BlockWakeKey { get; set; }
 
-		public Func<int>? BlockResumeHandler { get; set; }
-
-		public Func<bool>? BlockWakeHandler { get; set; }
+		// Stays set through the wake transition; Resume() consumes it when the thread pumps.
+		public IGuestThreadBlockWaiter? BlockWaiter { get; set; }
 
 		public long BlockDeadlineTimestamp { get; set; }
 
@@ -547,6 +557,38 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly object _guestThreadGate = new object();
 
+	// Diagnostic owner tracking for _guestThreadGate; written only while the
+	// gate is held, read lock-free by the stall watchdog's periodic snapshot.
+	private volatile string? _gateOwnerSite;
+	private int _gateOwnerManagedThreadId;
+	private long _gateAcquireTimestamp;
+
+	private GateHolder LockGate(string site)
+	{
+		Monitor.Enter(_guestThreadGate);
+		_gateOwnerSite = site;
+		Volatile.Write(ref _gateOwnerManagedThreadId, Environment.CurrentManagedThreadId);
+		Volatile.Write(ref _gateAcquireTimestamp, Stopwatch.GetTimestamp());
+		return new GateHolder(this);
+	}
+
+	private readonly struct GateHolder : IDisposable
+	{
+		private readonly DirectExecutionBackend _owner;
+
+		public GateHolder(DirectExecutionBackend owner)
+		{
+			_owner = owner;
+		}
+
+		public void Dispose()
+		{
+			_owner._gateOwnerSite = null;
+			Volatile.Write(ref _owner._gateOwnerManagedThreadId, 0);
+			Monitor.Exit(_owner._guestThreadGate);
+		}
+	}
+
 	private readonly Queue<GuestThreadState> _readyGuestThreads = new Queue<GuestThreadState>();
 
 	// Once set, guest worker threads are unwound to the host at their next import
@@ -611,8 +653,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private static readonly RawExceptionHandlerDelegate RawVectoredHandlerDelegateInstance = RawVectoredHandlerManaged;
 	private static readonly RawExceptionHandlerDelegate RawUnhandledFilterDelegateInstance = RawUnhandledFilterManaged;
 
-	private static readonly nint ImportGatewayPtr =
-		Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance);
+	private static readonly nint ImportGatewayPtr = ResolveImportGatewayPtr();
+
+	// Emitted import trampolines use the Win64 ABI. Managed callbacks use the
+	// host ABI, so POSIX needs a small Win64-to-SysV register-shuffling thunk.
+	private static nint ResolveImportGatewayPtr()
+	{
+		var managedPtr = Marshal.GetFunctionPointerForDelegate(ImportGatewayDelegateInstance);
+		return OperatingSystem.IsWindows()
+			? managedPtr
+			: PosixHostStubs.CreateWin64ToSysVThunk(managedPtr);
+	}
 
 	private static readonly nint RawVectoredHandlerPtrManaged =
 		Marshal.GetFunctionPointerForDelegate(RawVectoredHandlerDelegateInstance);
@@ -866,7 +917,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_hostThreading = _hostPlatform.Threading;
 		_hostSymbols = _hostPlatform.Symbols;
 		_hostMemory = _hostPlatform.Memory;
-		_faultHandling = faultHandling ?? new WindowsFaultHandling(_hostMemory);
+		_faultHandling = faultHandling ?? (OperatingSystem.IsWindows()
+			? new WindowsFaultHandling(_hostMemory)
+			: NullHostFaultHandling.Instance);
 		_selfHandle = GCHandle.Alloc(this);
 		_selfHandlePtr = GCHandle.ToIntPtr(_selfHandle);
 		_guestTlsBaseTlsIndex = _hostThreading.AllocateTlsSlot();
@@ -1977,26 +2030,54 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			throw new OutOfMemoryException("Failed to allocate TLS handler");
 		}
+		// The handler runs in place of a patched guest `mov reg, fs:[0]`,
+		// which preserves every register and the flags. TlsGetValue (and the
+		// Win64 ABI in general) clobbers rcx/rdx/r8-r11 and the arithmetic
+		// flags, so save them all: guest code legitimately keeps live values
+		// and comparison results across TLS reads, and losing them corrupted
+		// deterministic computations (e.g. procedural texture generation).
 		byte* tlsHandlerAddress = (byte*)_tlsHandlerAddress;
 		int num = 0;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 131;
-		tlsHandlerAddress[num++] = 236;
-		tlsHandlerAddress[num++] = 40;
-		tlsHandlerAddress[num++] = 185;
+		tlsHandlerAddress[num++] = 0x9C;                    // pushfq
+		tlsHandlerAddress[num++] = 0x51;                    // push rcx
+		tlsHandlerAddress[num++] = 0x52;                    // push rdx
+		tlsHandlerAddress[num++] = 0x41;                    // push r8
+		tlsHandlerAddress[num++] = 0x50;
+		tlsHandlerAddress[num++] = 0x41;                    // push r9
+		tlsHandlerAddress[num++] = 0x51;
+		tlsHandlerAddress[num++] = 0x41;                    // push r10
+		tlsHandlerAddress[num++] = 0x52;
+		tlsHandlerAddress[num++] = 0x41;                    // push r11
+		tlsHandlerAddress[num++] = 0x53;
+		tlsHandlerAddress[num++] = 0x48;                    // sub rsp, 0x20
+		tlsHandlerAddress[num++] = 0x83;
+		tlsHandlerAddress[num++] = 0xEC;
+		tlsHandlerAddress[num++] = 0x20;
+		tlsHandlerAddress[num++] = 0xB9;                    // mov ecx, index
 		*(uint*)(tlsHandlerAddress + num) = _guestTlsBaseTlsIndex;
 		num += 4;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 184;
+		tlsHandlerAddress[num++] = 0x48;                    // mov rax, TlsGetValue
+		tlsHandlerAddress[num++] = 0xB8;
 		*(long*)(tlsHandlerAddress + num) = _tlsGetValueAddress;
 		num += 8;
-		tlsHandlerAddress[num++] = byte.MaxValue;
-		tlsHandlerAddress[num++] = 208;
-		tlsHandlerAddress[num++] = 72;
-		tlsHandlerAddress[num++] = 131;
-		tlsHandlerAddress[num++] = 196;
-		tlsHandlerAddress[num++] = 40;
-		tlsHandlerAddress[num++] = 195;
+		tlsHandlerAddress[num++] = 0xFF;                    // call rax
+		tlsHandlerAddress[num++] = 0xD0;
+		tlsHandlerAddress[num++] = 0x48;                    // add rsp, 0x20
+		tlsHandlerAddress[num++] = 0x83;
+		tlsHandlerAddress[num++] = 0xC4;
+		tlsHandlerAddress[num++] = 0x20;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r11
+		tlsHandlerAddress[num++] = 0x5B;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r10
+		tlsHandlerAddress[num++] = 0x5A;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r9
+		tlsHandlerAddress[num++] = 0x59;
+		tlsHandlerAddress[num++] = 0x41;                    // pop r8
+		tlsHandlerAddress[num++] = 0x58;
+		tlsHandlerAddress[num++] = 0x5A;                    // pop rdx
+		tlsHandlerAddress[num++] = 0x59;                    // pop rcx
+		tlsHandlerAddress[num++] = 0x9D;                    // popfq
+		tlsHandlerAddress[num++] = 0xC3;                    // ret
 		_tlsPatchStubOffset = (num + 15) & ~15;
 		uint num2 = default(uint);
 		if (!_hostMemory.Protect((ulong)(void*)_tlsHandlerAddress, TlsHandlerRegionSize, HostPageProtection.ReadExecute, out num2))
@@ -2614,7 +2695,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			return false;
 		}
-		lock (_guestThreadGate)
+		using (LockGate("TryStartThread"))
 		{
 			_guestThreads[request.ThreadHandle] = thread;
 			_readyGuestThreads.Enqueue(thread);
@@ -2650,10 +2731,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
+		// Joins regularly park here for minutes (a game main thread joining a
+		// streamer); polling at a fixed 1ms burns half a host core for the
+		// whole wait, so back off toward a 10ms cadence once the join is
+		// clearly long-lived.
+		var joinPollMilliseconds = 1;
 		while (!ActiveForcedGuestExit)
 		{
 			Thread? hostThread;
-			lock (_guestThreadGate)
+			using (LockGate("TryJoinThread"))
 			{
 				if (!_guestThreads.TryGetValue(threadHandle, out var thread))
 				{
@@ -2690,16 +2776,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				try
 				{
-					hostThread.Join(1);
+					hostThread.Join(joinPollMilliseconds);
 				}
 				catch (ThreadStateException)
 				{
-					Thread.Sleep(1);
+					Thread.Sleep(joinPollMilliseconds);
 				}
 			}
 			else
 			{
-				Thread.Sleep(1);
+				Thread.Sleep(joinPollMilliseconds);
+			}
+
+			if (joinPollMilliseconds < 10)
+			{
+				joinPollMilliseconds++;
 			}
 		}
 
@@ -2729,7 +2820,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			for (int i = 0; i < 8; i++)
 			{
 				GuestThreadState? thread = null;
-				lock (_guestThreadGate)
+				using (LockGate("Pump.dequeue"))
 				{
 					while (_readyGuestThreads.Count > 0)
 					{
@@ -2760,7 +2851,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					Name = $"Hyper5-{thread.Name}",
 					Priority = MapGuestThreadPriority(thread.Priority),
 				};
-				lock (_guestThreadGate)
+				using (LockGate("Pump.bind_host"))
 				{
 					thread.HostThread = hostThread;
 				}
@@ -2781,7 +2872,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		var wakeCount = 0;
-		lock (_guestThreadGate)
+		using (LockGate("WakeBlockedThreads"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
@@ -2797,14 +2888,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					continue;
 				}
 
-				if (thread.BlockWakeHandler is not null && !thread.BlockWakeHandler())
+				if (thread.BlockWaiter is not null && !thread.BlockWaiter.TryWake())
 				{
 					continue;
 				}
 
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
-				thread.BlockWakeHandler = null;
 				thread.BlockDeadlineTimestamp = 0;
 				_readyGuestThreads.Enqueue(thread);
 				Interlocked.Increment(ref _readyGuestThreadCount);
@@ -2831,7 +2921,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads()
 	{
-		lock (_guestThreadGate)
+		using (LockGate("SnapshotThreads"))
 		{
 			var snapshots = new GuestThreadSnapshot[_guestThreads.Count];
 			var index = 0;
@@ -2855,8 +2945,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong guestThreadHandle,
 		GuestCpuContinuation continuation,
 		string wakeKey,
-		Func<int>? resumeHandler,
-		Func<bool>? wakeHandler,
+		IGuestThreadBlockWaiter? waiter,
 		long blockDeadlineTimestamp)
 	{
 		if (guestThreadHandle == 0 || continuation.Rip < 65536 || continuation.Rsp == 0)
@@ -2864,7 +2953,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
-		lock (_guestThreadGate)
+		using (LockGate("RegisterBlockedContinuation"))
 		{
 			if (!_guestThreads.TryGetValue(guestThreadHandle, out var thread))
 			{
@@ -2874,8 +2963,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			thread.BlockedContinuation = continuation;
 			thread.HasBlockedContinuation = true;
 			thread.BlockWakeKey = wakeKey;
-			thread.BlockResumeHandler = resumeHandler;
-			thread.BlockWakeHandler = wakeHandler;
+			thread.BlockWaiter = waiter;
 			thread.BlockDeadlineTimestamp = blockDeadlineTimestamp;
 		}
 	}
@@ -2884,7 +2972,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		var now = Stopwatch.GetTimestamp();
 		var wakeCount = 0;
-		lock (_guestThreadGate)
+		using (LockGate("WakeExpiredBlockedGuestThreads"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
@@ -2898,7 +2986,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				thread.State = GuestThreadRunState.Ready;
 				thread.BlockReason = null;
-				thread.BlockWakeHandler = null;
 				thread.BlockDeadlineTimestamp = 0;
 				_readyGuestThreads.Enqueue(thread);
 				Interlocked.Increment(ref _readyGuestThreadCount);
@@ -2976,7 +3063,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private GuestThreadState[] SnapshotGuestThreads()
 	{
-		lock (_guestThreadGate)
+		using (LockGate("SnapshotGuestThreads"))
 		{
 			return _guestThreads.Values.ToArray();
 		}
@@ -3166,7 +3253,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		if (currentGuestThreadHandle != 0)
 		{
 			GuestContinuationRunner? runner;
-			lock (_guestThreadGate)
+			using (LockGate("TryCallGuestContinuation"))
 			{
 				if (_guestThreads.TryGetValue(currentGuestThreadHandle, out var guestThread))
 				{
@@ -3258,7 +3345,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		_guestTeardownRequested = true;
 		Thread[] hostThreads;
-		lock (_guestThreadGate)
+		using (LockGate("RequestGuestThreadTeardown"))
 		{
 			_readyGuestThreads.Clear();
 			Interlocked.Exchange(ref _readyGuestThreadCount, 0);
@@ -3288,7 +3375,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private void ClearGuestThreads()
 	{
 		GuestContinuationRunner[] runners;
-		lock (_guestThreadGate)
+		using (LockGate("ClearGuestThreads"))
 		{
 			runners = _guestThreads.Values
 				.Select(static thread => thread.ContinuationRunner)
@@ -3575,9 +3662,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			LastError = null;
 			GuestCpuContinuation continuation = default;
-			Func<int>? resumeHandler = null;
+			IGuestThreadBlockWaiter? blockWaiter = null;
 			var resumeContinuation = false;
-			lock (_guestThreadGate)
+			using (LockGate("RunGuestThread.block"))
 			{
 				if (thread.HasBlockedContinuation)
 				{
@@ -3585,17 +3672,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					thread.BlockedContinuation = default;
 					thread.HasBlockedContinuation = false;
 					thread.BlockWakeKey = null;
-					resumeHandler = thread.BlockResumeHandler;
-					thread.BlockResumeHandler = null;
-					thread.BlockWakeHandler = null;
+					blockWaiter = thread.BlockWaiter;
+					thread.BlockWaiter = null;
 					thread.BlockDeadlineTimestamp = 0;
 					resumeContinuation = true;
 				}
 			}
 
-			if (resumeHandler is not null)
+			if (blockWaiter is not null)
 			{
-				continuation = continuation with { Rax = unchecked((ulong)(long)resumeHandler()) };
+				continuation = continuation with { Rax = unchecked((ulong)(long)blockWaiter.Resume()) };
 			}
 
 			if (_logGuestThreads)
@@ -3608,7 +3694,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var exitReason = resumeContinuation
 				? ExecuteBlockedGuestThreadContinuation(thread.Context, continuation, thread.Name, out var blockReason)
 				: ExecuteGuestThreadEntry(thread.Context, thread.EntryPoint, thread.Name, out blockReason);
-			lock (_guestThreadGate)
+			using (LockGate("RunGuestThread.exit"))
 			{
 				switch (exitReason)
 				{
@@ -3620,12 +3706,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						thread.State = GuestThreadRunState.Blocked;
 						thread.BlockReason = blockReason;
 						if (thread.HasBlockedContinuation &&
-							thread.BlockWakeHandler is not null &&
-							thread.BlockWakeHandler())
+							thread.BlockWaiter is not null &&
+							thread.BlockWaiter.TryWake())
 						{
 							thread.State = GuestThreadRunState.Ready;
 							thread.BlockReason = null;
-							thread.BlockWakeHandler = null;
 							thread.BlockDeadlineTimestamp = 0;
 							_readyGuestThreads.Enqueue(thread);
 							Interlocked.Increment(ref _readyGuestThreadCount);
@@ -4362,6 +4447,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return 20;
 	}
 
+	// HYPER5_PERIODIC_SNAPSHOT_SECONDS=N: dump the stall snapshot every N
+	// seconds regardless of progress, for diagnosing soft stalls where imports
+	// keep flowing but the game stops advancing.
+	private static int GetPeriodicSnapshotSeconds()
+	{
+		if (int.TryParse(Environment.GetEnvironmentVariable("HYPER5_PERIODIC_SNAPSHOT_SECONDS"), out var result))
+		{
+			return Math.Max(0, result);
+		}
+		return 0;
+	}
+
 	private void StartStallWatchdog()
 	{
 		int stallWatchdogSeconds = GetStallWatchdogSeconds();
@@ -4391,6 +4488,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		dispatcherThread.Start();
 
 		long num = (long)((double)stallWatchdogSeconds * Stopwatch.Frequency);
+		var periodicSnapshotTicks = (long)((double)GetPeriodicSnapshotSeconds() * Stopwatch.Frequency);
+		var lastPeriodicSnapshot = Stopwatch.GetTimestamp();
 		_stallWatchdogThread = new Thread(new ThreadStart(delegate
 		{
 			while (!_stallWatchdogStop)
@@ -4399,6 +4498,58 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				if (_stallWatchdogStop)
 				{
 					break;
+				}
+				if (periodicSnapshotTicks > 0 &&
+					Stopwatch.GetTimestamp() - lastPeriodicSnapshot >= periodicSnapshotTicks)
+				{
+					lastPeriodicSnapshot = Stopwatch.GetTimestamp();
+					var gateOwnerSite = _gateOwnerSite;
+					var gateOwnerTid = Volatile.Read(ref _gateOwnerManagedThreadId);
+					var gateHeldMs = gateOwnerSite is null
+						? 0.0
+						: Stopwatch.GetElapsedTime(Volatile.Read(ref _gateAcquireTimestamp)).TotalMilliseconds;
+					var snapshotText = new System.Text.StringBuilder();
+					snapshotText.AppendLine(
+						$"[LOADER][DIAG] Periodic snapshot: gate_owner={gateOwnerSite ?? "none"} " +
+						$"gate_tid={gateOwnerTid} gate_held_ms={gateHeldMs:0}");
+					// Never touch the gate here: the periodic snapshot must keep
+					// reporting even (especially) when the gate is wedged.
+					// Dump guest threads without the lock; tolerate torn reads.
+					try
+					{
+						foreach (var thread in _guestThreads.Values)
+						{
+							snapshotText.AppendLine(
+								$"[LOADER][DIAG] gateless guest-thread: handle=0x{thread.ThreadHandle:X16} name='{thread.Name}' " +
+								$"state={thread.State} imports={Interlocked.Read(ref thread.ImportCount)} " +
+								$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
+								$"block={thread.BlockReason ?? "none"} wake={thread.BlockWakeKey ?? "none"}");
+						}
+					}
+					catch (Exception snapshotError)
+					{
+						snapshotText.AppendLine($"[LOADER][DIAG] gateless snapshot failed: {snapshotError.Message}");
+					}
+
+					// Console can be wedged by whatever is being diagnosed, so
+					// write to a side file when one is configured and fall back
+					// to stderr otherwise.
+					var snapshotPath = Environment.GetEnvironmentVariable("HYPER5_PERIODIC_SNAPSHOT_FILE");
+					if (!string.IsNullOrWhiteSpace(snapshotPath))
+					{
+						try
+						{
+							System.IO.File.AppendAllText(snapshotPath, snapshotText.ToString());
+						}
+						catch
+						{
+						}
+					}
+					else
+					{
+						Console.Error.Write(snapshotText.ToString());
+						Console.Error.Flush();
+					}
 				}
 				long num2 = Stopwatch.GetTimestamp() - Volatile.Read(ref _lastProgressTimestamp);
 				if (num2 < num)
@@ -4448,7 +4599,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private bool HasReadyGuestThread()
 	{
 		WakeExpiredBlockedGuestThreads();
-		lock (_guestThreadGate)
+		using (LockGate("HasReadyGuestThread"))
 		{
 			foreach (var thread in _guestThreads.Values)
 			{
@@ -4637,6 +4788,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// Native guest workers park idle once every guest thread has unwound; stop
 		// them before any executable stub or TLS index they reference is freed.
 		DisposeNativeGuestExecutors();
+
+		if (ReferenceEquals(_posixSignalBackend, this))
+		{
+			// The signal handlers stay installed (they chain to the previous
+			// action when no backend is active), but must stop dispatching
+			// into a disposed backend.
+			_posixSignalBackend = null;
+		}
 		ClearImportHandlerTrampolines();
 		_importEntries = Array.Empty<ImportStubEntry>();
 		_runtimeSymbolsByName.Clear();

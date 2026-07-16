@@ -1,9 +1,11 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-namespace Hyper5.Libs.Agc;
+using Hyper5.ShaderCompiler;
 
-internal static partial class Gen5SpirvTranslator
+namespace Hyper5.ShaderCompiler.Vulkan;
+
+public static partial class Gen5SpirvTranslator
 {
     private const uint ScalarRegisterCount = 256;
     private const uint VectorRegisterCount = 512;

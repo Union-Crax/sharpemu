@@ -12,8 +12,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
   </PropertyGroup>
 
+  <!-- References only the shader-compiler projects: the conformance tool is
+       emulator-independent by design. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Hyper5.Libs\Hyper5.Libs.csproj" />
+    <ProjectReference Include="..\..\src\Hyper5.ShaderCompiler\Hyper5.ShaderCompiler.csproj" />
+    <ProjectReference Include="..\..\src\Hyper5.ShaderCompiler.Vulkan\Hyper5.ShaderCompiler.Vulkan.csproj" />
   </ItemGroup>
 
 </Project>

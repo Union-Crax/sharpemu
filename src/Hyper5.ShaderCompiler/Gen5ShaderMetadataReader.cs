@@ -3,9 +3,9 @@
 
 using Hyper5.HLE;
 
-namespace Hyper5.Libs.Agc;
+namespace Hyper5.ShaderCompiler;
 
-internal static class Gen5ShaderMetadataReader
+public static class Gen5ShaderMetadataReader
 {
     private const ulong ShaderUserDataOffset = 0x08;
     private const int ResourceClassCount = 4;
