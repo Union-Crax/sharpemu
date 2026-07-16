@@ -305,6 +305,7 @@ public static class KernelSemaphoreCompatExports
             }
 
             GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelWaitSema");
+            KernelExceptionCompatExports.TryDeliverPendingSignals(ctx);
             if ((++spins & 63) == 0)
             {
                 Thread.Sleep(1);

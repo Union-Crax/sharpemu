@@ -1440,6 +1440,7 @@ public static class KernelPthreadCompatExports
                 try
                 {
                     scheduler.Pump(ctx, "pthread_cond_wait");
+                    KernelExceptionCompatExports.TryDeliverPendingSignals(ctx);
                 }
                 finally
                 {
@@ -1459,6 +1460,7 @@ public static class KernelPthreadCompatExports
                             try
                             {
                                 scheduler.Pump(ctx, "pthread_cond_wait");
+                                KernelExceptionCompatExports.TryDeliverPendingSignals(ctx);
                             }
                             finally
                             {

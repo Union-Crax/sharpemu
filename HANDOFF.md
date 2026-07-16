@@ -249,17 +249,41 @@ copyright headers left as-is. Our fixes were re-applied onto upstream's
 refactored semaphore file; MainWindow's user GUI rework was kept and ported to
 the new `HostGamepadButtons`/`WindowsDualSenseReader` pad API.
 
+**Sixth run — self-test theory was wrong; it's a real cross-thread raise.** On
+the merged build the new log line fired:
+`sceKernelRaiseException: cross-thread delivery not implemented (target=0x...77DC50 current=0x...77BC30 signo=30 ...)`.
+`current` is the `@` thread (Boehm GC), `target` is the MAIN thread's pthread
+handle — the GC thread suspends the main thread (parked in `pthread_cond_wait`)
+and waits for the handler's ack in `sceKernelWaitSema`; no ack → deadlock →
+watchdog stall dump. Only ONE raise appears even though 14 threads exist, which
+suggests the parked Baselib helpers sit in GC-safe blocking regions and don't
+need suspension — main is likely the only signal target.
+
+**Cross-thread delivery (this commit).** `KernelExceptionCompatExports` now
+queues a cross-thread raise per target pthread handle and delivers it on the
+TARGET thread at its next wait-poll safe point: the host-thread poll loops in
+`PthreadCondWaitCore` (both pump sites) and `HostThreadInfiniteWaitPoll` call
+`TryDeliverPendingSignals(ctx)` right after `Pump`, outside all locks. The
+handler therefore runs on the thread the signal was aimed at (correct
+`scePthreadSelf`/TLS), may block inside (ack-then-park is fine — the nested
+HLE wait pumps and can even deliver a nested restart signal), and the queue is
+drained before invocation so re-entry is safe. The main thread polls its cond
+wait every ~1 ms (`DefaultSpuriousCondWakeMilliseconds`), so delivery latency
+is negligible. If the raise targets a parked scheduler guest thread instead,
+we queue + log `delivery deferred until it next runs` — that case still needs
+the pending-signal-on-GuestThreadState + wake + handler-before-resume design
+(single `BlockedContinuation` slot insufficient; needs a nested continuation
+path).
+
 **Next steps:**
-1. Rebuild, re-run. Expect `sceKernelRaiseException: delivered signo=30 to self`
-   and the main thread to get past the condvar wait. If the handler faults
-   reading the zeroed context buffer, the fault log gives the exact offset it
-   wanted — that recovers the `mcontext_t` layout for a real context.
-2. The next stall will likely be actual GC stop-the-world: cross-thread
-   RaiseException against the parked helpers. Delivery design for that case:
-   record a pending signal on the target `GuestThreadState`, wake it, and in
-   `RunGuestThread` (before resuming its blocked continuation) run the handler
-   on that thread with the rebuilt context, then re-park (needs a nested
-   continuation path — the single `BlockedContinuation` slot isn't enough).
+1. Rebuild, re-run. Expect `queued signo=30 for thread=...` followed within
+   ~1 ms by `delivered pending signo=30 on thread=...`. Then either the world
+   stops/restarts and boot proceeds, or the handler faults reading the zeroed
+   context buffer — the fault offset recovers the `mcontext_t` layout the
+   handler wants.
+2. If a stall follows a `delivery deferred until it next runs` line, the GC is
+   signalling parked scheduler guest threads and the nested-continuation
+   design above becomes the next task.
 
 ## Suggested next steps, in priority order
 
